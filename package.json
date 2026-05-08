@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
+    },
+    "./ambient": {
+      "types": "./dist/ambient.d.ts",
+      "import": "./dist/ambient.mjs",
+      "require": "./dist/ambient.cjs"
     }
   },
   "files": [

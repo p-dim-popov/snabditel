@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Snabditel } from './snabditel.js';
+import { Snabditel, createToken } from './snabditel.js';
 
 describe('Snabditel', () => {
   it('resolves a class via static getInstance', async () => {
@@ -212,6 +212,156 @@ describe('Snabditel', () => {
 
     expect(a1).not.toBe(a2);
     expect(b1).not.toBe(b2);
+  });
+
+  it('does not poison the cache when getInstance throws synchronously; next call retries', async () => {
+    let calls = 0;
+    class Bang {
+      static getInstance() {
+        calls++;
+        if (calls === 1) throw new Error('sync boom');
+        return { ok: true };
+      }
+    }
+    const s = new Snabditel();
+    await expect(s.resolve(Bang)).rejects.toThrow('sync boom');
+    const v = await s.resolve(Bang);
+    expect(v.ok).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('seed during in-flight resolve wins for future resolvers', async () => {
+    let calls = 0;
+    class Slow {
+      static async getInstance() {
+        calls++;
+        await new Promise((r) => setTimeout(r, 10));
+        return { tag: 'real' };
+      }
+    }
+    const s = new Snabditel();
+    const inflight = s.resolve(Slow);
+    s.seed(Slow, { tag: 'fake' } as Awaited<ReturnType<typeof Slow.getInstance>>);
+    const v = await s.resolve(Slow);
+    expect(v.tag).toBe('fake');
+    await inflight;
+    const v2 = await s.resolve(Slow);
+    expect(v2.tag).toBe('fake');
+    expect(calls).toBe(1);
+  });
+
+  it('Token<T> gives type-safe seed and resolve', async () => {
+    type Req = { url: string };
+    const REQUEST = createToken<Req>('request');
+    const s = new Snabditel();
+    s.seed(REQUEST, { url: '/x' });
+    const got = await s.resolve(REQUEST);
+    expect(got.url).toBe('/x');
+  });
+
+  it('dispose calls Symbol.asyncDispose on cached instances', async () => {
+    const closed: string[] = [];
+    class Conn {
+      static async getInstance() {
+        return {
+          [Symbol.asyncDispose]: async () => {
+            closed.push('conn');
+          },
+        };
+      }
+    }
+    const s = new Snabditel();
+    await s.resolve(Conn);
+    await s.dispose();
+    expect(closed).toEqual(['conn']);
+  });
+
+  it('dispose calls Symbol.dispose on cached instances when async not present', async () => {
+    const closed: string[] = [];
+    class Sync {
+      static async getInstance() {
+        return {
+          [Symbol.dispose]: () => {
+            closed.push('sync');
+          },
+        };
+      }
+    }
+    const s = new Snabditel();
+    await s.resolve(Sync);
+    await s.dispose();
+    expect(closed).toEqual(['sync']);
+  });
+
+  it('run auto-disposes scoped instances cached on the child scope', async () => {
+    const closed: string[] = [];
+    class Scoped {
+      static async getInstance() {
+        return {
+          [Symbol.asyncDispose]: async () => {
+            closed.push('scoped');
+          },
+        };
+      }
+    }
+    const root = new Snabditel();
+    await root.run(async (s) => {
+      await s.resolve(Scoped);
+    });
+    expect(closed).toEqual(['scoped']);
+  });
+
+  it('run does not dispose singletons cached on root', async () => {
+    const closed: string[] = [];
+    class Db {
+      static injectionScope = 'singleton' as const;
+      static async getInstance() {
+        return {
+          [Symbol.asyncDispose]: async () => {
+            closed.push('db');
+          },
+        };
+      }
+    }
+    const root = new Snabditel();
+    await root.run(async (s) => {
+      await s.resolve(Db);
+    });
+    expect(closed).toEqual([]);
+    await root.dispose();
+    expect(closed).toEqual(['db']);
+  });
+
+  it('run rethrows fn errors and still disposes the child', async () => {
+    const closed: string[] = [];
+    class Scoped {
+      static async getInstance() {
+        return {
+          [Symbol.asyncDispose]: async () => {
+            closed.push('scoped');
+          },
+        };
+      }
+    }
+    const root = new Snabditel();
+    await expect(
+      root.run(async (s) => {
+        await s.resolve(Scoped);
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(closed).toEqual(['scoped']);
+  });
+
+  it('resolve on a disposed scope throws', async () => {
+    class Svc {
+      static async getInstance() {
+        return { ok: true };
+      }
+    }
+    const s = new Snabditel();
+    await s.dispose();
+    await expect(s.resolve(Svc)).rejects.toThrow(/disposed/);
   });
 
   it("manual seed of a 'transient' class is honored locally (seed wins over lifetime)", async () => {
