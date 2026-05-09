@@ -174,4 +174,29 @@ describe("AlsSnabditel", () => {
     const s = new AlsSnabditel();
     await expect(s.resolve("MISSING")).rejects.toThrow(/Unknown token/);
   });
+
+  test("plain class resolves and caches as singleton (no deps)", async () => {
+    class Foo {}
+    const s = new AlsSnabditel();
+    const a = await s.resolve(Foo);
+    const b = await s.resolve(Foo);
+    expect(a).toBeInstanceOf(Foo);
+    expect(a).toBe(b);
+  });
+
+  test("SelfResolvable singleton: createInstance awaited and cached", async () => {
+    let calls = 0;
+    const r: SelfResolvable<{ n: number }> = {
+      createInstance: async () => {
+        calls++;
+        return { n: 7 };
+      },
+    };
+    const s = new AlsSnabditel();
+    const a = await s.resolve(r);
+    const b = await s.resolve(r);
+    expect(a.n).toBe(7);
+    expect(a).toBe(b);
+    expect(calls).toBe(1);
+  });
 });
