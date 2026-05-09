@@ -343,4 +343,114 @@ describe("AlsSnabditel", () => {
       expect(o2.cfg.v).toBe(3);
     });
   });
+
+  test("explicit singleton + scoped dep throws clear error", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    class B {
+      static readonly injectionScope = "singleton" as const;
+      static async createInstance() {
+        await s.resolve(A);
+        return new B();
+      }
+    }
+
+    await expect(s.run(async () => s.resolve(B))).rejects.toThrow(
+      /Cannot resolve B as singleton: depends on a scoped service/,
+    );
+  });
+
+  test("explicit singleton + transient dep throws", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "transient",
+    };
+    const s = new AlsSnabditel();
+    class B {
+      static readonly injectionScope = "singleton" as const;
+      static async createInstance() {
+        await s.resolve(A);
+        return new B();
+      }
+    }
+
+    await expect(s.resolve(B)).rejects.toThrow(
+      /Cannot resolve B as singleton: depends on a transient service/,
+    );
+  });
+
+  test("explicit scoped + transient dep throws", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "transient",
+    };
+    const s = new AlsSnabditel();
+    class B {
+      static readonly injectionScope = "scoped" as const;
+      static async createInstance() {
+        await s.resolve(A);
+        return new B();
+      }
+    }
+
+    await expect(s.run(async () => s.resolve(B))).rejects.toThrow(
+      /Cannot resolve B as scoped: depends on a transient service/,
+    );
+  });
+
+  test("explicit transient + scoped dep ok", async () => {
+    const A: SelfResolvable<{ tag: "A" }> = {
+      createInstance: () => ({ tag: "A" }),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const B: SelfResolvable<{ a: { tag: "A" } }> = {
+      createInstance: async () => ({ a: await s.resolve(A) }),
+      injectionScope: "transient",
+    };
+
+    await s.run(async () => {
+      const b1 = await s.resolve(B);
+      const b2 = await s.resolve(B);
+      expect(b1).not.toBe(b2);          // transient: fresh each time
+      expect(b1.a).toBe(b2.a);          // shared scoped A within run
+    });
+  });
+
+  test("explicit scoped + singleton dep ok", async () => {
+    class A {}
+    const s = new AlsSnabditel();
+    const B: SelfResolvable<{ a: A }> = {
+      createInstance: async () => ({ a: await s.resolve(A) }),
+      injectionScope: "scoped",
+    };
+
+    await s.run(async () => {
+      const b = await s.resolve(B);
+      expect(b.a).toBeInstanceOf(A);
+    });
+  });
+
+  test("validation error aborts createInstance early (side effects after first violating resolve do not run)", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    let sideEffect = 0;
+    class B {
+      static readonly injectionScope = "singleton" as const;
+      static async createInstance() {
+        await s.resolve(A);
+        sideEffect++;          // must NOT run — bubble should throw before reaching here
+        return new B();
+      }
+    }
+
+    await expect(s.run(async () => s.resolve(B))).rejects.toThrow(/singleton/);
+    expect(sideEffect).toBe(0);
+  });
 });
