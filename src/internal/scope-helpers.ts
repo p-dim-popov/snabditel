@@ -21,6 +21,10 @@ export function isWider(
   return RANK[declared] > RANK[min];
 }
 
+/**
+ * Returns the explicit `injectionScope` declared on the binding, or `undefined` when none is set.
+ * Caller decides the default — `AlsSnabditel` infers it from dependency scopes.
+ */
 export function scopeOf<T>(
   binding: Resolvable<T>,
 ): InjectionScope | undefined {

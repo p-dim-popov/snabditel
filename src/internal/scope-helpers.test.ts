@@ -4,6 +4,8 @@ import {
   isWider,
   scopeOf,
   ownerName,
+  mismatchError,
+  effectiveScopedNoRunError,
 } from "./scope-helpers";
 
 describe("narrower", () => {
@@ -66,5 +68,45 @@ describe("ownerName", () => {
   });
   test("SelfResolvable object literal -> 'anonymous SelfResolvable'", () => {
     expect(ownerName({ createInstance: () => ({}) })).toBe("anonymous SelfResolvable");
+  });
+  test("SelfResolvable instance with named constructor -> constructor name", () => {
+    class MyFactory {
+      createInstance() { return {}; }
+    }
+    expect(ownerName(new MyFactory() as unknown as Parameters<typeof ownerName>[0])).toBe("MyFactory");
+  });
+});
+
+describe("mismatchError", () => {
+  test("message includes owner name, declared scope, and min scope", () => {
+    class B {}
+    const err = mismatchError(B, "singleton", "scoped");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("B");
+    expect(err.message).toContain("singleton");
+    expect(err.message).toContain("scoped");
+    expect(err.message).toMatch(/Cannot resolve B as singleton/);
+    expect(err.message).toMatch(/depends on a scoped service/);
+    expect(err.message).toMatch(/inherit 'scoped'/);
+    expect(err.message).toMatch(/'scoped' or 'transient'/);
+  });
+
+  test("uses 'anonymous SelfResolvable' for object literal owner", () => {
+    const err = mismatchError({ createInstance: () => ({}) }, "scoped", "transient");
+    expect(err.message).toContain("anonymous SelfResolvable");
+    expect(err.message).toContain("scoped");
+    expect(err.message).toContain("transient");
+  });
+});
+
+describe("effectiveScopedNoRunError", () => {
+  test("message includes owner name and references inherited scoped dep + run() requirement", () => {
+    class Owner {}
+    const err = effectiveScopedNoRunError(Owner);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("Owner");
+    expect(err.message).toContain("'scoped'");
+    expect(err.message).toContain("inherited from a scoped dependency");
+    expect(err.message).toContain("run() scope");
   });
 });
