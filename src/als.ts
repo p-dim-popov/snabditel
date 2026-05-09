@@ -82,6 +82,8 @@ export class AlsSnabditel implements ASnabditel {
       resolveSettled = resolve;
       rejectSettled = reject;
     });
+    // Suppress unhandled-rejection when no waiter subscribes to this in-flight promise.
+    pending.catch(() => undefined);
     this.inFlight.set(token, pending as Promise<BuildResult<unknown>>);
 
     try {

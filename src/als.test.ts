@@ -199,4 +199,40 @@ describe("AlsSnabditel", () => {
     expect(a).toBe(b);
     expect(calls).toBe(1);
   });
+
+  test("explicit scoped: same instance within run, different across runs", async () => {
+    const r: SelfResolvable<{ id: number }> = {
+      createInstance: () => ({ id: Math.random() }),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const a = await s.run(async () => {
+      const x = await s.resolve(r);
+      const y = await s.resolve(r);
+      expect(x).toBe(y);
+      return x;
+    });
+    const b = await s.run(async () => s.resolve(r));
+    expect(a).not.toBe(b);
+  });
+
+  test("explicit transient: new instance each resolve, no cache", async () => {
+    const r: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "transient",
+    };
+    const s = new AlsSnabditel();
+    const a = await s.resolve(r);
+    const b = await s.resolve(r);
+    expect(a).not.toBe(b);
+  });
+
+  test("explicit scoped resolved outside run throws", async () => {
+    const r: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    await expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
+  });
 });
