@@ -68,12 +68,21 @@ export class AlsSnabditel implements ASnabditel {
   }
 
   private async builder<T>(token: Resolvable<T>): Promise<T> {
+    const parent = this.frameAls.getStore() ?? null;
+
+    // Cycle detection: walk parent chain looking for the same owner token.
+    for (let f: Frame | null = parent; f !== null; f = f.parent) {
+      if (f.ownerToken === token) {
+        throw new Error("Cycle detected during resolution");
+      }
+    }
+
     const declared = scopeOf(token);
     const frame: Frame = {
       ownerToken: token,
       declared,
       minScope: "singleton",
-      parent: this.frameAls.getStore() ?? null,
+      parent,
     };
 
     let resolveSettled!: (r: BuildResult<T>) => void;
@@ -153,6 +162,13 @@ export class AlsSnabditel implements ASnabditel {
 
     const pending = this.inFlight.get(token);
     if (pending) {
+      // Cycle detection: if this token is an ancestor in the current frame chain,
+      // awaiting it would deadlock.
+      for (let f: Frame | null = this.frameAls.getStore() ?? null; f !== null; f = f.parent) {
+        if (f.ownerToken === token) {
+          throw new Error("Cycle detected during resolution");
+        }
+      }
       return this.waiter(token, pending as Promise<BuildResult<T>>);
     }
 
