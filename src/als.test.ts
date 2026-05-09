@@ -453,4 +453,100 @@ describe("AlsSnabditel", () => {
     await expect(s.run(async () => s.resolve(B))).rejects.toThrow(/singleton/);
     expect(sideEffect).toBe(0);
   });
+
+  test("concurrent same-run resolves of unset-scope token: single build (lock)", async () => {
+    let calls = 0;
+    const Slow: SelfResolvable<{ id: number }> = {
+      createInstance: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 10));
+        return { id: calls };
+      },
+    };
+    const s = new AlsSnabditel();
+    const [a, b, c] = await Promise.all([
+      s.resolve(Slow),
+      s.resolve(Slow),
+      s.resolve(Slow),
+    ]);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(calls).toBe(1);
+  });
+
+  test("concurrent cross-run resolves: unset -> singleton -> single build", async () => {
+    let calls = 0;
+    const Slow: SelfResolvable<{ id: number }> = {
+      createInstance: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 10));
+        return { id: calls };
+      },
+    };
+    const s = new AlsSnabditel();
+    const [a, b] = await Promise.all([
+      s.run(async () => s.resolve(Slow)),
+      s.run(async () => s.resolve(Slow)),
+    ]);
+    expect(a).toBe(b);
+    expect(calls).toBe(1);
+  });
+
+  test("concurrent cross-run resolves: unset -> scoped -> each run rebuilds with own value", async () => {
+    let calls = 0;
+    const A: SelfResolvable<{ tag: "A"; n: number }> = {
+      createInstance: () => ({ tag: "A", n: ++calls }),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const Owner: SelfResolvable<{ a: { tag: "A"; n: number } }> = {
+      createInstance: async () => ({ a: await s.resolve(A) }),
+    };
+
+    const [o1, o2] = await Promise.all([
+      s.run(async () => s.resolve(Owner)),
+      s.run(async () => s.resolve(Owner)),
+    ]);
+    expect(o1).not.toBe(o2);
+    expect(o1.a).not.toBe(o2.a);
+  });
+
+  test("builder rejects: all waiters get same rejection, no cache", async () => {
+    let calls = 0;
+    const Bad: SelfResolvable<{ ok: boolean }> = {
+      createInstance: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 10));
+        throw new Error("boom");
+      },
+    };
+    const s = new AlsSnabditel();
+    const results = await Promise.allSettled([
+      s.resolve(Bad),
+      s.resolve(Bad),
+      s.resolve(Bad),
+    ]);
+    for (const r of results) {
+      expect(r.status).toBe("rejected");
+      if (r.status === "rejected") {
+        expect((r.reason as Error).message).toBe("boom");
+      }
+    }
+    expect(calls).toBe(1);
+  });
+
+  test("effective-scoped token resolved outside run throws clear error", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const Owner: SelfResolvable<{ a: object }> = {
+      createInstance: async () => ({ a: await s.resolve(A) }),
+    };
+
+    await expect(s.resolve(Owner)).rejects.toThrow(
+      /effective scope is 'scoped'.*no run\(\) scope is active/,
+    );
+  });
 });

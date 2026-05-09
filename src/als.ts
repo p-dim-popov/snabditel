@@ -122,9 +122,7 @@ export class AlsSnabditel implements ASnabditel {
     }
     if (effective === "scoped") {
       if (builtInScope === null) {
-        throw declared === undefined
-          ? effectiveScopedNoRunError(token)
-          : new Error("Scoped resolution requires an active run() scope");
+        throw effectiveScopedNoRunError(token);
       }
       builtInScope.set(token, value);
       return;
@@ -151,7 +149,31 @@ export class AlsSnabditel implements ASnabditel {
       return (await currentScope.get(token)) as T;
     }
 
-    // inFlight + waiter handled in Task 9; for now go straight to builder
+    const pending = this.inFlight.get(token);
+    if (pending) {
+      return this.waiter(token, pending as Promise<BuildResult<T>>);
+    }
+
     return this.builder(token);
+  }
+
+  private async waiter<T>(
+    token: Resolvable<T>,
+    pending: Promise<BuildResult<T>>,
+  ): Promise<T> {
+    const result = await pending;
+    this.bubble(result.effectiveScope);
+
+    if (result.effectiveScope === "singleton") {
+      return result.value;
+    }
+    if (result.effectiveScope === "scoped") {
+      if ((this.scopeAls.getStore() ?? null) === result.builtInScope) {
+        return result.value;
+      }
+      return this.resolve(token);          // restart in our run
+    }
+    // transient
+    return this.resolve(token);
   }
 }
