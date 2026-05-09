@@ -235,4 +235,112 @@ describe("AlsSnabditel", () => {
     const s = new AlsSnabditel();
     await expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
   });
+
+  test("unset owner depending on scoped dep becomes scoped", async () => {
+    const A: SelfResolvable<{ tag: "A" }> = {
+      createInstance: () => ({ tag: "A" }),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const B: SelfResolvable<{ a: { tag: "A" } }> = {
+      // no injectionScope
+      createInstance: async () => ({ a: await s.resolve(A) }),
+    };
+
+    const b1 = await s.run(async () => s.resolve(B));
+    const b2 = await s.run(async () => s.resolve(B));
+    expect(b1).not.toBe(b2);
+    expect(b1.a).not.toBe(b2.a);
+  });
+
+  test("unset owner depending only on singleton stays singleton", async () => {
+    class Logger {}
+    const s = new AlsSnabditel();
+    const Wrapper: SelfResolvable<{ l: Logger }> = {
+      createInstance: async () => ({ l: await s.resolve(Logger) }),
+    };
+
+    const w1 = await s.resolve(Wrapper);
+    const w2 = await s.resolve(Wrapper);
+    expect(w1).toBe(w2);
+  });
+
+  test("unset owner depending on transient dep becomes transient", async () => {
+    const T: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "transient",
+    };
+    const s = new AlsSnabditel();
+    const Owner: SelfResolvable<{ t: object }> = {
+      createInstance: async () => ({ t: await s.resolve(T) }),
+    };
+
+    const o1 = await s.resolve(Owner);
+    const o2 = await s.resolve(Owner);
+    expect(o1).not.toBe(o2);
+  });
+
+  test("mixed deps {singleton, scoped} on unset owner -> scoped", async () => {
+    class Singleton {}
+    const Scoped: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const Owner: SelfResolvable<{ sg: Singleton; sc: object }> = {
+      createInstance: async () => ({
+        sg: await s.resolve(Singleton),
+        sc: await s.resolve(Scoped),
+      }),
+    };
+
+    const o1 = await s.run(async () => s.resolve(Owner));
+    const o2 = await s.run(async () => s.resolve(Owner));
+    expect(o1).not.toBe(o2);
+  });
+
+  test("mixed deps {singleton, scoped, transient} on unset owner -> transient", async () => {
+    class Singleton {}
+    const Scoped: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const Transient: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "transient",
+    };
+    const s = new AlsSnabditel();
+    const Owner: SelfResolvable<{ sg: Singleton; sc: object; tr: object }> = {
+      createInstance: async () => ({
+        sg: await s.resolve(Singleton),
+        sc: await s.resolve(Scoped),
+        tr: await s.resolve(Transient),
+      }),
+    };
+
+    const [o1, o2] = await s.run(async () => [
+      await s.resolve(Owner),
+      await s.resolve(Owner),
+    ]);
+    expect(o1).not.toBe(o2);
+  });
+
+  test("string seed dep scope inferred from cache location: scoped seed -> owner scoped", async () => {
+    const s = new AlsSnabditel();
+    s.seed("CFG", { v: 1 });
+    const Owner: SelfResolvable<{ cfg: { v: number } }> = {
+      createInstance: async () => ({ cfg: await s.resolve<{ v: number }>("CFG") }),
+    };
+
+    await s.run(async () => {
+      s.seed("CFG", { v: 2 }, { injectionScope: "scoped" });
+      const o1 = await s.resolve(Owner);
+      expect(o1.cfg.v).toBe(2);
+    });
+    await s.run(async () => {
+      s.seed("CFG", { v: 3 }, { injectionScope: "scoped" });
+      const o2 = await s.resolve(Owner);
+      expect(o2.cfg.v).toBe(3);
+    });
+  });
 });
