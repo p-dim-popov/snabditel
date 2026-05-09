@@ -180,6 +180,43 @@ await di.run(async () => {
 });
 ```
 
+### Scope inheritance and validation (`AlsSnabditel`)
+
+In `AlsSnabditel`, a token's effective scope is the narrowest scope of its dependencies when `injectionScope` is omitted, and an explicit `injectionScope` that is wider than its narrowest dependency throws at resolve time.
+
+Lifetime ordering, narrowest to widest: `transient` → `scoped` → `singleton`.
+
+```ts
+import { AlsSnabditel } from "snabditel/als";
+
+const di = new AlsSnabditel();
+
+class RequestId {
+  static readonly injectionScope = "scoped" as const;
+  static createInstance() { return new RequestId(); }
+  id = crypto.randomUUID();
+}
+
+class UserService {
+  // No injectionScope. Effective scope = scoped (inherited from RequestId).
+  static async createInstance() {
+    const req = await di.resolve(RequestId);
+    return new UserService(req);
+  }
+  constructor(private req: RequestId) {}
+}
+
+class BadCache {
+  static readonly injectionScope = "singleton" as const;
+  static async createInstance() {
+    await di.resolve(RequestId);    // throws: declared singleton, dep is scoped
+    return new BadCache();
+  }
+}
+```
+
+Inference and validation are first-resolve operations. Once a token is cached, subsequent resolves do not re-evaluate. Base `Snabditel` does not implement inheritance or validation; declared `injectionScope` is taken as-is.
+
 ## Seeding
 
 Pre-populate values by class, string, or symbol token. Useful for test doubles and per-request data.
