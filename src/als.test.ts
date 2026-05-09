@@ -535,7 +535,7 @@ describe("AlsSnabditel", () => {
     expect(calls).toBe(1);
   });
 
-  test("effective-scoped token resolved outside run throws clear error", async () => {
+  test("scoped dep resolved outside run throws (blocks owner with effective scope = scoped)", async () => {
     const A: SelfResolvable<object> = {
       createInstance: () => ({}),
       injectionScope: "scoped",
@@ -545,8 +545,6 @@ describe("AlsSnabditel", () => {
       createInstance: async () => ({ a: await s.resolve(A) }),
     };
 
-    await expect(s.resolve(Owner)).rejects.toThrow(
-      /effective scope is 'scoped'.*no run\(\) scope is active/,
-    );
+    await expect(s.resolve(Owner)).rejects.toThrow(/run\(\) scope/);
   });
 });

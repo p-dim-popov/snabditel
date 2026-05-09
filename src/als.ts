@@ -122,7 +122,9 @@ export class AlsSnabditel implements ASnabditel {
     }
     if (effective === "scoped") {
       if (builtInScope === null) {
-        throw effectiveScopedNoRunError(token);
+        throw declared === undefined
+          ? effectiveScopedNoRunError(token)
+          : new Error("Scoped resolution requires an active run() scope");
       }
       builtInScope.set(token, value);
       return;
