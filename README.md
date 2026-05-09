@@ -279,7 +279,7 @@ class Snabditel {
   run<T>(cb: () => Promise<T>): Promise<T>;
 }
 
-class AlsSnabditel extends Snabditel {} // ALS-backed run()
+class AlsSnabditel implements ASnabditel {} // ALS-backed run() + scope inheritance + validation
 ```
 
 ## Develop
