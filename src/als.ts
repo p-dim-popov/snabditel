@@ -1,41 +1,48 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Snabditel } from "./snabditel";
-import type { Token } from "./snabditel.types";
+import type {
+  ASnabditel,
+  InjectionScope,
+  Resolvable,
+  SeedOptions,
+  Token,
+} from "./snabditel.types";
+import { readSeedToken, writeSeed } from "./internal/seed-helpers";
 
-type Scope = Map<unknown, unknown>;
+type Key = unknown;
+type Scope = Map<Key, unknown>;
 
-export class AlsSnabditel extends Snabditel {
-  private als = new AsyncLocalStorage<Scope>();
-  private resolvingAls = new AsyncLocalStorage<Set<unknown>>();
+type Frame = {
+  ownerToken: Resolvable<unknown>;
+  declared: InjectionScope | undefined;
+  minScope: InjectionScope;
+  parent: Frame | null;
+};
 
-  protected override getScope(): Scope | null {
-    return this.als.getStore() ?? null;
+type BuildResult<T> = {
+  value: T;
+  effectiveScope: InjectionScope;
+  builtInScope: Scope | null;
+};
+
+export class AlsSnabditel implements ASnabditel {
+  private singletons: Scope = new Map();
+  private scopeAls = new AsyncLocalStorage<Scope>();
+  private frameAls = new AsyncLocalStorage<Frame>();
+  private inFlight = new Map<Key, Promise<BuildResult<unknown>>>();
+
+  async run<T>(callback: () => Promise<T>): Promise<T> {
+    return this.scopeAls.run(new Map(), callback);
   }
 
-  override async run<T>(callback: () => Promise<T>): Promise<T> {
-    return this.als.run(new Map(), callback);
+  seed<T>(
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions = {},
+  ): void {
+    writeSeed(this.singletons, () => this.scopeAls.getStore() ?? null, token, value, options);
   }
 
-  override async resolve<T>(token: Token<T>): Promise<T> {
-    if (!this.resolvingAls.getStore()) {
-      return this.resolvingAls.run(new Set(), () => this.resolveTracked(token));
-    }
-    return this.resolveTracked(token);
-  }
-
-  private async resolveTracked<T>(token: Token<T>): Promise<T> {
-    if (typeof token === "string" || typeof token === "symbol") {
-      return super.resolve(token);
-    }
-    const resolving = this.resolvingAls.getStore()!;
-    if (resolving.has(token)) {
-      throw new Error("Cycle detected during resolution");
-    }
-    resolving.add(token);
-    try {
-      return await super.resolve(token);
-    } finally {
-      resolving.delete(token);
-    }
+  async resolve<T>(_token: Token<T>): Promise<T> {
+    throw new Error("not implemented yet");
   }
 }
