@@ -46,7 +46,7 @@ describe("AlsSnabditel", () => {
       injectionScope: "scoped",
     };
     const s = new AlsSnabditel();
-    expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
+    await expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
   });
 
   test("singleton works as in base class", async () => {
@@ -86,7 +86,7 @@ describe("AlsSnabditel", () => {
         return {};
       },
     };
-    expect(s.resolve(a)).rejects.toThrow(/Cycle detected/);
+    await expect(s.resolve(a)).rejects.toThrow(/Cycle detected/);
   });
 
   test("nested run gets fresh scope", async () => {
@@ -104,5 +104,46 @@ describe("AlsSnabditel", () => {
       });
     });
     expect(outer!).not.toBe(inner!);
+  });
+
+  test("concurrent runs resolving same singleton: single-flight, one createInstance", async () => {
+    let calls = 0;
+    const r: SelfResolvable<{ id: number }> = {
+      createInstance: async () => {
+        calls++;
+        await new Promise((res) => setTimeout(res, 10));
+        return { id: calls };
+      },
+    };
+    const s = new AlsSnabditel();
+    const [a, b] = await Promise.all([
+      s.run(async () => s.resolve(r)),
+      s.run(async () => s.resolve(r)),
+    ]);
+    expect(a).toBe(b);
+    expect(calls).toBe(1);
+  });
+
+  test("concurrent resolve of same scoped within one run: single-flight", async () => {
+    let calls = 0;
+    const r: SelfResolvable<{ id: number }> = {
+      createInstance: async () => {
+        calls++;
+        await new Promise((res) => setTimeout(res, 10));
+        return { id: calls };
+      },
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    await s.run(async () => {
+      const [a, b, c] = await Promise.all([
+        s.resolve(r),
+        s.resolve(r),
+        s.resolve(r),
+      ]);
+      expect(a).toBe(b);
+      expect(b).toBe(c);
+    });
+    expect(calls).toBe(1);
   });
 });

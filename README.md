@@ -34,7 +34,7 @@ class Logger {
 }
 
 class UserService {
-  static injectionScope = "scoped";
+  static readonly injectionScope = "scoped";
   static async createInstance() {
     const logger = await di.resolve(Logger);
     return new UserService(logger);
@@ -167,7 +167,7 @@ const cfg = await di.resolve<{ apiUrl: string }>("CFG");
 
 ```ts
 class RequestContext {
-  static injectionScope = "scoped";
+  static readonly injectionScope = "scoped";
   static createInstance() { return new RequestContext(); }
 
   id = crypto.randomUUID();

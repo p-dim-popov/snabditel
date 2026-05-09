@@ -12,11 +12,6 @@ type Scope = Map<Key, unknown>;
 export class Snabditel implements ASnabditel {
   protected singletons: Scope = new Map();
   protected localScope: Scope | null = null;
-  private instanceResolving: Set<Key> = new Set();
-
-  protected getResolvingSet(): Set<Key> {
-    return this.instanceResolving;
-  }
 
   seed<T>(
     token: string | symbol | (new (...args: any[]) => T),
@@ -61,10 +56,10 @@ export class Snabditel implements ASnabditel {
     if (typeof token === "string" || typeof token === "symbol") {
       const scope = this.getScope();
       if (scope?.has(token)) {
-        return scope.get(token) as T;
+        return (await scope.get(token)) as T;
       }
       if (this.singletons.has(token)) {
-        return this.singletons.get(token) as T;
+        return (await this.singletons.get(token)) as T;
       }
       throw new Error(`Unknown token: ${String(token)}. String and symbol tokens must be seeded before resolution.`);
     }
@@ -72,40 +67,29 @@ export class Snabditel implements ASnabditel {
     const injectionScope = this.scopeOf(token);
 
     if (injectionScope === "singleton") {
-      if (this.singletons.has(token)) {
-        return this.singletons.get(token) as T;
-      }
-      const instance = await this.buildGuarded(token);
-      this.singletons.set(token, instance);
-      return instance;
+      return this.cacheBuild(this.singletons, token);
     }
     if (injectionScope === "scoped") {
       const scope = this.getScope();
       if (!scope) {
         throw new Error("Scoped resolution requires an active run() scope");
       }
-      if (scope.has(token)) {
-        return scope.get(token) as T;
-      }
-      const instance = await this.buildGuarded(token);
-      scope.set(token, instance);
-      return instance;
+      return this.cacheBuild(scope, token);
     }
 
-    return await this.buildGuarded(token);
+    return this.build(token);
   }
 
-  private async buildGuarded<T>(token: Resolvable<T>): Promise<T> {
-    const resolving = this.getResolvingSet();
-    if (resolving.has(token)) {
-      throw new Error("Cycle detected during resolution");
+  private cacheBuild<T>(cache: Scope, token: Resolvable<T>): Promise<T> {
+    if (cache.has(token)) {
+      return Promise.resolve(cache.get(token) as T | Promise<T>);
     }
-    resolving.add(token);
-    try {
-      return await this.build(token);
-    } finally {
-      resolving.delete(token);
-    }
+    const p = this.build(token);
+    cache.set(token, p);
+    p.catch(() => {
+      if (cache.get(token) === p) cache.delete(token);
+    });
+    return p;
   }
 
   private scopeOf<T>(binding: Resolvable<T>): InjectionScope {
@@ -114,7 +98,7 @@ export class Snabditel implements ASnabditel {
     return injectionScope ?? "singleton";
   }
 
-  private async build<T>(binding: Resolvable<T>): Promise<T> {
+  protected async build<T>(binding: Resolvable<T>): Promise<T> {
     if ("createInstance" in binding) {
       return await binding.createInstance();
     }

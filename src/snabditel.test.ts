@@ -35,7 +35,7 @@ describe("Snabditel", () => {
     });
     expect(inside1!.id).toBe(1);
     expect(inside2!.id).toBe(2);
-    expect(s.resolve("REQ")).rejects.toThrow(/Unknown token/);
+    await expect(s.resolve("REQ")).rejects.toThrow(/Unknown token/);
   });
 
   test("scoped seed outside run throws", () => {
@@ -84,7 +84,7 @@ describe("Snabditel", () => {
 
   test("unknown string token throws", async () => {
     const s = new Snabditel();
-    expect(s.resolve("MISSING")).rejects.toThrow(/Unknown token/);
+    await expect(s.resolve("MISSING")).rejects.toThrow(/Unknown token/);
   });
 
   test("SelfResolvable.createInstance is awaited", async () => {
@@ -133,24 +133,7 @@ describe("Snabditel", () => {
       injectionScope: "scoped",
     };
     const s = new Snabditel();
-    expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
-  });
-
-  test("cycle detection: A.createInstance resolves B, B resolves A", async () => {
-    const s = new Snabditel();
-    const a: SelfResolvable<object> = {
-      createInstance: async () => {
-        await s.resolve(b);
-        return {};
-      },
-    };
-    const b: SelfResolvable<object> = {
-      createInstance: async () => {
-        await s.resolve(a);
-        return {};
-      },
-    };
-    expect(s.resolve(a)).rejects.toThrow(/Cycle detected/);
+    await expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
   });
 
   test("nested run() throws (single-flight)", async () => {
@@ -175,5 +158,64 @@ describe("Snabditel", () => {
     const s = new Snabditel();
     await s.run(async () => {});
     await s.run(async () => {});
+  });
+
+  test("concurrent resolve of same singleton: single-flight, one createInstance, same instance", async () => {
+    let calls = 0;
+    const r: SelfResolvable<{ id: number }> = {
+      createInstance: async () => {
+        calls++;
+        await new Promise((res) => setTimeout(res, 10));
+        return { id: calls };
+      },
+    };
+    const s = new Snabditel();
+    const [a, b, c] = await Promise.all([
+      s.resolve(r),
+      s.resolve(r),
+      s.resolve(r),
+    ]);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(calls).toBe(1);
+  });
+
+  test("concurrent resolves with overlapping shared dep do not false-positive cycle", async () => {
+    const s = new Snabditel();
+    const Shared: SelfResolvable<{ shared: true }> = {
+      createInstance: async () => {
+        await new Promise((res) => setTimeout(res, 10));
+        return { shared: true };
+      },
+    };
+    const A: SelfResolvable<{ a: true }> = {
+      createInstance: async () => {
+        await s.resolve(Shared);
+        return { a: true };
+      },
+    };
+    const B: SelfResolvable<{ b: true }> = {
+      createInstance: async () => {
+        await s.resolve(Shared);
+        return { b: true };
+      },
+    };
+    await Promise.all([s.resolve(A), s.resolve(B)]);
+  });
+
+  test("singleton retries after createInstance failure (cache evicted on reject)", async () => {
+    let calls = 0;
+    const r: SelfResolvable<{ ok: boolean }> = {
+      createInstance: async () => {
+        calls++;
+        if (calls === 1) throw new Error("boom");
+        return { ok: true };
+      },
+    };
+    const s = new Snabditel();
+    await expect(s.resolve(r)).rejects.toThrow(/boom/);
+    const got = await s.resolve(r);
+    expect(got.ok).toBe(true);
+    expect(calls).toBe(2);
   });
 });

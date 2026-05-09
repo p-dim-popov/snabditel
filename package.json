@@ -23,17 +23,18 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun run clean && bun run build:esm && bun run build:cjs && bun run build:types",
+    "build": "bun run typecheck &&bun run clean && bun run build:esm && bun run build:cjs && bun run build:types",
     "build:esm": "bun build ./src/index.ts ./src/als-index.ts --outdir ./dist/esm --format esm --target node",
     "build:cjs": "bun build ./src/index.ts ./src/als-index.ts --outdir ./dist/cjs --format cjs --target node",
-    "build:types": "tsc -p tsconfig.types.json",
+    "build:types": "tsgo -p tsconfig.types.json",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "test": "bun test",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@typescript/native-preview": "^7.0.0-dev.20260509.2",
     "typescript": "^6.0.3"
   }
 }
