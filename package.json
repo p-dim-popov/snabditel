@@ -1,0 +1,39 @@
+{
+  "name": "snabditel",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./als": {
+      "types": "./dist/types/als-index.d.ts",
+      "import": "./dist/esm/als-index.js",
+      "require": "./dist/cjs/als-index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun run clean && bun run build:esm && bun run build:cjs && bun run build:types",
+    "build:esm": "bun build ./src/index.ts ./src/als-index.ts --outdir ./dist/esm --format esm --target node",
+    "build:cjs": "bun build ./src/index.ts ./src/als-index.ts --outdir ./dist/cjs --format cjs --target node",
+    "build:types": "tsc -p tsconfig.types.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^6.0.3"
+  }
+}

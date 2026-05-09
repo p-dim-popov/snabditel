@@ -1,0 +1,179 @@
+import { describe, expect, test } from "bun:test";
+import { Snabditel } from "./snabditel";
+import type { SelfResolvable } from "./snabditel.types";
+
+describe("Snabditel", () => {
+  test("resolve(Class) instantiates and caches as singleton by default", async () => {
+    class Foo {}
+    const s = new Snabditel();
+    const a = await s.resolve(Foo);
+    const b = await s.resolve(Foo);
+    expect(a).toBeInstanceOf(Foo);
+    expect(a).toBe(b);
+  });
+
+  test("seed pre-populates string token", async () => {
+    const s = new Snabditel();
+    s.seed("CFG", { url: "x" });
+    const got = await s.resolve<{ url: string }>("CFG");
+    expect(got.url).toBe("x");
+  });
+
+  test("seed with scoped option lives in current run scope", async () => {
+    const s = new Snabditel();
+    const req1 = { id: 1 };
+    const req2 = { id: 2 };
+    let inside1: typeof req1 | null = null;
+    let inside2: typeof req2 | null = null;
+    await s.run(async () => {
+      s.seed("REQ", req1, { injectionScope: "scoped" });
+      inside1 = await s.resolve<typeof req1>("REQ");
+    });
+    await s.run(async () => {
+      s.seed("REQ", req2, { injectionScope: "scoped" });
+      inside2 = await s.resolve<typeof req2>("REQ");
+    });
+    expect(inside1!.id).toBe(1);
+    expect(inside2!.id).toBe(2);
+    expect(s.resolve("REQ")).rejects.toThrow(/Unknown token/);
+  });
+
+  test("scoped seed outside run throws", () => {
+    const s = new Snabditel();
+    expect(() => s.seed("REQ", {}, { injectionScope: "scoped" })).toThrow(
+      /run\(\) scope/,
+    );
+  });
+
+  test("transient seed throws", () => {
+    const s = new Snabditel();
+    expect(() => s.seed("X", {}, { injectionScope: "transient" })).toThrow(
+      /transient/,
+    );
+  });
+
+  test("scoped seed shadows singleton seed in run", async () => {
+    const s = new Snabditel();
+    s.seed("LOG", "global");
+    let inside: string | null = null;
+    let outside: string;
+    await s.run(async () => {
+      s.seed("LOG", "request", { injectionScope: "scoped" });
+      inside = await s.resolve<string>("LOG");
+    });
+    outside = await s.resolve<string>("LOG");
+    expect(inside!).toBe("request");
+    expect(outside).toBe("global");
+  });
+
+  test("seed pre-populates symbol token", async () => {
+    const s = new Snabditel();
+    const TOK = Symbol("tok");
+    s.seed(TOK, 42);
+    expect(await s.resolve<number>(TOK)).toBe(42);
+  });
+
+  test("seed pre-populates class token (overrides ctor)", async () => {
+    class Foo { hi() { return "real"; } }
+    const fake = { hi: () => "fake" } as unknown as Foo;
+    const s = new Snabditel();
+    s.seed(Foo, fake);
+    const got = await s.resolve(Foo);
+    expect(got.hi()).toBe("fake");
+  });
+
+  test("unknown string token throws", async () => {
+    const s = new Snabditel();
+    expect(s.resolve("MISSING")).rejects.toThrow(/Unknown token/);
+  });
+
+  test("SelfResolvable.createInstance is awaited", async () => {
+    const r: SelfResolvable<{ n: number }> = {
+      createInstance: async () => ({ n: 7 }),
+    };
+    const s = new Snabditel();
+    const got = await s.resolve(r);
+    expect(got.n).toBe(7);
+  });
+
+  test("transient scope returns new instance each time", async () => {
+    const r: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "transient",
+    };
+    const s = new Snabditel();
+    const a = await s.resolve(r);
+    const b = await s.resolve(r);
+    expect(a).not.toBe(b);
+  });
+
+  test("scoped: same instance within run, different across runs", async () => {
+    const r: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new Snabditel();
+    let inner1a: object | null = null;
+    let inner1b: object | null = null;
+    await s.run(async () => {
+      inner1a = await s.resolve(r);
+      inner1b = await s.resolve(r);
+    });
+    let inner2: object | null = null;
+    await s.run(async () => {
+      inner2 = await s.resolve(r);
+    });
+    expect(inner1a!).toBe(inner1b!);
+    expect(inner1a!).not.toBe(inner2!);
+  });
+
+  test("scoped resolve outside run throws", async () => {
+    const r: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new Snabditel();
+    expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
+  });
+
+  test("cycle detection: A.createInstance resolves B, B resolves A", async () => {
+    const s = new Snabditel();
+    const a: SelfResolvable<object> = {
+      createInstance: async () => {
+        await s.resolve(b);
+        return {};
+      },
+    };
+    const b: SelfResolvable<object> = {
+      createInstance: async () => {
+        await s.resolve(a);
+        return {};
+      },
+    };
+    expect(s.resolve(a)).rejects.toThrow(/Cycle detected/);
+  });
+
+  test("nested run() throws (single-flight)", async () => {
+    const s = new Snabditel();
+    await expect(
+      s.run(async () => {
+        await s.run(async () => {});
+      }),
+    ).rejects.toThrow(/already active/);
+  });
+
+  test("concurrent run() throws (single-flight)", async () => {
+    const s = new Snabditel();
+    const slow = s.run(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    await expect(s.run(async () => {})).rejects.toThrow(/already active/);
+    await slow;
+  });
+
+  test("sequential run() works after prior completes", async () => {
+    const s = new Snabditel();
+    await s.run(async () => {});
+    await s.run(async () => {});
+  });
+});
