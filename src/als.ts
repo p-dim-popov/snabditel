@@ -7,6 +7,11 @@ import type {
   Token,
 } from "./snabditel.types";
 import { readSeedToken, writeSeed } from "./internal/seed-helpers";
+import {
+  isWider,
+  mismatchError,
+  narrower,
+} from "./internal/scope-helpers";
 
 type Key = unknown;
 type Scope = Map<Key, unknown>;
@@ -42,7 +47,24 @@ export class AlsSnabditel implements ASnabditel {
     writeSeed(this.singletons, () => this.scopeAls.getStore() ?? null, token, value, options);
   }
 
-  async resolve<T>(_token: Token<T>): Promise<T> {
+  private bubble(scope: InjectionScope): void {
+    const frame = this.frameAls.getStore();
+    if (!frame) return;
+    const next = narrower(frame.minScope, scope);
+    if (next === frame.minScope) return;
+    frame.minScope = next;
+    if (frame.declared !== undefined && isWider(frame.declared, frame.minScope)) {
+      throw mismatchError(frame.ownerToken, frame.declared, frame.minScope);
+    }
+  }
+
+  async resolve<T>(token: Token<T>): Promise<T> {
+    if (typeof token === "string" || typeof token === "symbol") {
+      const scope = this.scopeAls.getStore() ?? null;
+      const result = await readSeedToken<T>(this.singletons, scope, token);
+      this.bubble(result.source);
+      return result.value;
+    }
     throw new Error("not implemented yet");
   }
 }

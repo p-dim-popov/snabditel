@@ -147,3 +147,31 @@ describe("AlsSnabditel", () => {
     expect(calls).toBe(1);
   });
 });
+
+test("resolve string token returns seeded singleton (skeleton wiring)", async () => {
+  const s = new AlsSnabditel();
+  s.seed("K", 42);
+  expect(await s.resolve<number>("K")).toBe(42);
+});
+
+test("resolve symbol token returns seeded singleton", async () => {
+  const s = new AlsSnabditel();
+  const T = Symbol("t");
+  s.seed(T, 5);
+  expect(await s.resolve<number>(T)).toBe(5);
+});
+
+test("scoped seed shadows singleton seed within run", async () => {
+  const s = new AlsSnabditel();
+  s.seed("K", "global");
+  await s.run(async () => {
+    s.seed("K", "request", { injectionScope: "scoped" });
+    expect(await s.resolve<string>("K")).toBe("request");
+  });
+  expect(await s.resolve<string>("K")).toBe("global");
+});
+
+test("unknown string token throws", async () => {
+  const s = new AlsSnabditel();
+  await expect(s.resolve("MISSING")).rejects.toThrow(/Unknown token/);
+});
