@@ -336,9 +336,9 @@ await di.run(async (s) => {
 });
 ```
 
-#### Scope inheritance and validation (`AlsSnabditel`)
+#### Scope inheritance and validation
 
-In `AlsSnabditel`, a token's effective scope is the narrowest scope of its dependencies when `injectionScope` is omitted, and an explicit `injectionScope` that is wider than its narrowest dependency throws at resolve time.
+A token's effective scope is the narrowest scope of its dependencies when `injectionScope` is omitted, and an explicit `injectionScope` that is wider than its narrowest dependency throws at resolve time. Both `Snabditel` and `AlsSnabditel` apply this rule.
 
 Lifetime ordering, narrowest to widest: `transient` → `scoped` → `singleton`.
 

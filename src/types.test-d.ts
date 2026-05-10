@@ -117,8 +117,8 @@ async function _selfResolvableObjectScoped() {
     createInstance: async () => ({ id: 1 }),
     injectionScope: "scoped",
   };
-  await di.run(async () => {
-    const got = await di.resolve(r);
+  await di.run(async (s) => {
+    const got = await s.resolve(r);
     void got.id;
   });
 }
