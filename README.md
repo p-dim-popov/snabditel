@@ -122,3 +122,74 @@ export const Route = createFileRoute("/users")({
   },
 });
 ```
+
+### React + React Query
+
+Browser side. Base `Snabditel` with module-level singletons. No `run()` — base `Snabditel` is single-flight, and React Query fires queries in parallel. `Api` handles auth + base URL via `AppConfig`. `UsersClient` depends on `Api`. `useQuery` consumes `queryOptions` that resolve `UsersClient`.
+
+```ts
+// di.ts
+import { Snabditel } from "snabditel";
+
+export const di = new Snabditel();
+
+export class AppConfig {
+  static createInstance() {
+    return new AppConfig({ backendUrl: import.meta.env.VITE_BACKEND_URL });
+  }
+  constructor(private cfg: { backendUrl: string }) {}
+  get backendUrl() { return this.cfg.backendUrl; }
+}
+
+export class Api {
+  static async createInstance() {
+    return new Api(await di.resolve(AppConfig));
+  }
+  constructor(private config: AppConfig) {}
+  async request(path: string, init?: RequestInit) {
+    const token = await this.authToken();
+    return fetch(`${this.config.backendUrl}${path}`, {
+      ...init,
+      headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+    });
+  }
+  private async authToken() { /* lookup */ return ""; }
+}
+
+export class UsersClient {
+  static async createInstance() {
+    return new UsersClient(await di.resolve(Api));
+  }
+  constructor(private api: Api) {}
+  list() { return this.api.request("/users").then((r) => r.json()); }
+  get(id: string) { return this.api.request(`/users/${id}`).then((r) => r.json()); }
+}
+```
+
+```ts
+// users.queries.ts
+import { queryOptions } from "@tanstack/react-query";
+import { di, UsersClient } from "./di";
+
+export const usersQueryOptions = queryOptions({
+  queryKey: ["users"],
+  queryFn: async () => {
+    const users = await di.resolve(UsersClient);
+    return users.list();
+  },
+});
+```
+
+```tsx
+// Users.tsx
+import { useQuery } from "@tanstack/react-query";
+import { usersQueryOptions } from "./users.queries";
+
+export function Users() {
+  const { data } = useQuery(usersQueryOptions);
+  return <ul>{data?.map((u: any) => <li key={u.id}>{u.name}</li>)}</ul>;
+}
+```
+
+For per-query scoping in the browser, swap to `AlsSnabditel` and use a runtime that supports `AsyncLocalStorage` (or polyfill).
+```
