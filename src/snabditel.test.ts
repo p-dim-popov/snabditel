@@ -357,4 +357,9 @@ describe("Snabditel", () => {
     const after = await captured.resolve(RequestId);
     expect(after).toBe(inside);
   });
+
+  test("source does not import node:async_hooks", async () => {
+    const source = await Bun.file(`${import.meta.dir}/snabditel.ts`).text();
+    expect(source).not.toMatch(/async_hooks/);
+  });
 });
