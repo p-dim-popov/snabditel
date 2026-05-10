@@ -547,4 +547,90 @@ describe("AlsSnabditel", () => {
 
     await expect(s.resolve(Owner)).rejects.toThrow(/run\(\) scope/);
   });
+
+  // ----- ported from deleted internal/ helper unit tests (black-box) -----
+
+  test("mismatchError message: full wording for named class owner", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    class B {
+      static readonly injectionScope = "singleton" as const;
+      static async createInstance() {
+        await s.resolve(A);
+        return new B();
+      }
+    }
+    await expect(s.run(async () => s.resolve(B))).rejects.toThrow(
+      /Cannot resolve B as singleton: depends on a scoped service\. Either remove `injectionScope` to inherit 'scoped', or set it to 'scoped' or 'transient'\./,
+    );
+  });
+
+  test("mismatchError uses 'anonymous SelfResolvable' for object-literal owner", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const Owner: SelfResolvable<{ a: object }> = {
+      createInstance: async () => ({ a: await s.resolve(A) }),
+      injectionScope: "singleton",
+    };
+    await expect(s.run(async () => s.resolve(Owner))).rejects.toThrow(
+      /Cannot resolve anonymous SelfResolvable as singleton: depends on a scoped service/,
+    );
+  });
+
+  test("mismatchError uses 'anonymous class' for class with empty name", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    const Anon = class {
+      static readonly injectionScope = "singleton" as const;
+      static async createInstance() {
+        await s.resolve(A);
+        return new Anon();
+      }
+    };
+    Object.defineProperty(Anon, "name", { value: "" });
+    await expect(s.run(async () => s.resolve(Anon))).rejects.toThrow(
+      /Cannot resolve anonymous class as singleton/,
+    );
+  });
+
+  test("mismatchError uses constructor name for SelfResolvable instance owner", async () => {
+    const A: SelfResolvable<object> = {
+      createInstance: () => ({}),
+      injectionScope: "scoped",
+    };
+    const s = new AlsSnabditel();
+    class MyFactory {
+      readonly injectionScope = "singleton" as const;
+      async createInstance() {
+        await s.resolve(A);
+        return {};
+      }
+    }
+    const owner = new MyFactory() as SelfResolvable<object>;
+    await expect(s.run(async () => s.resolve(owner))).rejects.toThrow(
+      /Cannot resolve MyFactory as singleton/,
+    );
+  });
+
+  test("seed under string token with Promise value: resolve awaits it", async () => {
+    const s = new AlsSnabditel();
+    s.seed<number>("K", Promise.resolve(42) as unknown as number);
+    expect(await s.resolve<number>("K")).toBe(42);
+  });
+
+  test("seed transient on AlsSnabditel throws", () => {
+    const s = new AlsSnabditel();
+    expect(() => s.seed("X", {}, { injectionScope: "transient" })).toThrow(
+      /transient/,
+    );
+  });
 });
