@@ -434,3 +434,7 @@ bun run build
 ```
 
 Source written for Bun, but the published package targets Node and runs anywhere ESM/CJS does.
+
+## License
+
+MIT
