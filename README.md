@@ -88,3 +88,37 @@ app.get("/users", async (_req, res) => {
 
 app.listen(3000);
 ```
+
+### TanStack Start
+
+Server middleware wraps `next()` in `di.run()`. Same `AlsSnabditel` pattern as Express.
+
+```ts
+import { createMiddleware } from "@tanstack/react-start";
+import { createFileRoute } from "@tanstack/react-router";
+import { AlsSnabditel } from "snabditel/als";
+
+const di = new AlsSnabditel();
+
+class UserService {
+  static readonly injectionScope = "scoped" as const;
+  static createInstance() { return new UserService(); }
+  list() { return [{ id: 1 }]; }
+}
+
+export const diMiddleware = createMiddleware().server(({ next }) =>
+  di.run(() => next()),
+);
+
+export const Route = createFileRoute("/users")({
+  server: {
+    middleware: [diMiddleware],
+    handlers: {
+      GET: async () => {
+        const users = await di.resolve(UserService);
+        return Response.json(users.list());
+      },
+    },
+  },
+});
+```
