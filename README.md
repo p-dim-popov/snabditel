@@ -70,7 +70,7 @@ import { AlsSnabditel } from "snabditel/als";
 const di = new AlsSnabditel();
 
 class UserService {
-  static readonly injectionScope = "scoped" as const;
+  static readonly injectionScope = "scoped";
   static createInstance() { return new UserService(); }
   list() { return [{ id: 1, name: "ada" }]; }
 }
@@ -100,7 +100,7 @@ import { AlsSnabditel } from "snabditel/als";
 export const di = new AlsSnabditel();
 
 export class UserService {
-  static readonly injectionScope = "scoped" as const;
+  static readonly injectionScope = "scoped";
   static createInstance() { return new UserService(); }
   list() { return [{ id: 1 }]; }
 }
@@ -148,7 +148,7 @@ export class AppConfig {
 }
 
 export class AuthToken {
-  static readonly injectionScope = "scoped" as const;
+  static readonly injectionScope = "scoped";
   static async createInstance() {
     return new AuthToken(await loadToken());
   }
@@ -156,7 +156,7 @@ export class AuthToken {
 }
 
 export class Api {
-  static readonly injectionScope = "transient" as const;
+  static readonly injectionScope = "transient";
   static async createInstance(s: ASnabditel) {
     return new Api(await s.resolve(AppConfig), await s.resolve(AuthToken));
   }
@@ -348,7 +348,7 @@ import { AlsSnabditel } from "snabditel/als";
 const di = new AlsSnabditel();
 
 class RequestId {
-  static readonly injectionScope = "scoped" as const;
+  static readonly injectionScope = "scoped";
   static createInstance() { return new RequestId(); }
   id = crypto.randomUUID();
 }
@@ -363,7 +363,7 @@ class UserService {
 }
 
 class BadCache {
-  static readonly injectionScope = "singleton" as const;
+  static readonly injectionScope = "singleton";
   static async createInstance() {
     await di.resolve(RequestId);    // throws: declared singleton, dep is scoped
     return new BadCache();
