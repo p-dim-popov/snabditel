@@ -278,6 +278,8 @@ describe("Snabditel", () => {
       }
     }
     const di = new Snabditel();
+    // Cast: class-recursive createInstance types confuse TS-LS into typing
+    // expect(p).rejects.toThrow(...) as void; tsgo is fine. Cast is safe.
     await (expect(di.resolve(A)).rejects.toThrow(/Cycle detected/) as unknown as Promise<void>);
   });
 
@@ -335,6 +337,8 @@ describe("Snabditel", () => {
       }
     }
     const di = new Snabditel();
+    // Cast: class-recursive createInstance types confuse TS-LS into typing
+    // expect(p).rejects.toThrow(...) as void; tsgo is fine. Cast is safe.
     await (expect(di.resolve(A)).rejects.toThrow(/Cycle detected/) as unknown as Promise<void>);
   });
 
