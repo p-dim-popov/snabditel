@@ -52,7 +52,7 @@ export type Scopeable = {
 Two classes total in main entrypoint:
 
 - `Snabditel` (default export): browser-safe, parallel scopes, scope inheritance + validation, no `node:async_hooks`.
-- `ScopedSnabditel` (internal, not exported): implements `ASnabditel`, returned to consumers only via the `s` argument.
+- The scope-bound resolver `s` passed to `run` callbacks and `createInstance` is **not** a class. It's an object literal `{ resolve, seed, run }` produced by a private `makeScoped(ctx)` method on `Snabditel`. Closures inside it access `Snabditel`'s private state via captured `this`. Externally typed only as `ASnabditel`.
 
 `AlsSnabditel` stays in subpath `snabditel/als` (§ ALS adapter).
 
@@ -85,28 +85,37 @@ type BuildResult<T> = {
 
 ### Class layout
 
+The scope-bound resolver `s` is **not** a separate class. It's an object literal built by a private method `makeScoped(ctx)`. The closures inside it access Snabditel's private state via captured `this`. The ALS variant overrides only two `protected` hooks — `outerCtx()` and `wrapAsync(ctx, fn)` — and never sees ALS-specific parameters in the base API.
+
 ```ts
 export class Snabditel implements ASnabditel {
   private singletons: Scope = new Map();
   // Single root-level inflight map shared across all scopes; keyed by token.
   private inflight = new Map<Key, Promise<BuildResult<unknown>>>();
 
-  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
-    const ctx: Ctx = { scope: new Map(), frame: null };
-    return this._runWithBoundScope(ctx, cb);
+  /* Hooks (subclasses override) */
+
+  /** Outer-level context. ALS variant returns the ALS-stored ctx; base = empty. */
+  protected outerCtx(): Ctx {
+    return { scope: null, frame: null };
   }
 
-  /** @internal — public on class; called by AlsSnabditel.run and ScopedSnabditel.run */
-  _runWithBoundScope<T>(
-    ctx: Ctx,
-    cb: (s: ASnabditel) => Promise<T>,
-  ): Promise<T> {
-    const s = new ScopedSnabditel(this, ctx);
-    return cb(s);
+  /** Wrap an async region in subclass context machinery. Base = pass-through. */
+  protected wrapAsync<T>(_ctx: Ctx, fn: () => Promise<T>): Promise<T> {
+    return fn();
+  }
+
+  /* Public ASnabditel surface */
+
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    const outer = this.outerCtx();
+    // Fresh scope; inherit outer frame so cycle detection survives nested run().
+    const ctx: Ctx = { scope: new Map(), frame: outer.frame };
+    return this.wrapAsync(ctx, () => cb(this.makeScoped(ctx)));
   }
 
   resolve<T>(token: Token<T>): Promise<T> {
-    return this._resolveIn(token, { scope: null, frame: null });
+    return this.resolveIn(token, this.outerCtx());
   }
 
   seed<T>(
@@ -114,62 +123,51 @@ export class Snabditel implements ASnabditel {
     value: T,
     options: SeedOptions = {},
   ): void {
-    return this._seedWith(token, value, options, null);
-  }
-
-  /** @internal — overridden by AlsSnabditel to wrap in ctxAls.run */
-  protected _runInChildCtx<T>(_ctx: Ctx, fn: () => Promise<T>): Promise<T> {
-    return fn();
-  }
-
-  /** @internal — public on class so ScopedSnabditel can delegate; not on ASnabditel interface */
-  _resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> { /* ... */ }
-
-  /** @internal — public on class so ScopedSnabditel can delegate; not on ASnabditel interface */
-  _seedWith<T>(
-    token: string | symbol | (new (...args: any[]) => T),
-    value: T,
-    options: SeedOptions,
-    alsScope: Scope | null,
-  ): void {
-    const injectionScope = options.injectionScope ?? "singleton";
-    if (injectionScope === "singleton") { this.singletons.set(token, value); return; }
-    if (injectionScope === "scoped") {
-      if (!alsScope) throw new Error("Scoped seed requires an active run() scope");
-      alsScope.set(token, value);
+    const which = options.injectionScope ?? "singleton";
+    if (which === "singleton") { this.singletons.set(token, value); return; }
+    if (which === "scoped") {
+      const target = this.outerCtx().scope;
+      if (!target) throw new Error("Scoped seed requires an active run() scope");
+      target.set(token, value);
       return;
     }
     throw new Error("Cannot seed a transient value");
   }
-}
 
-class ScopedSnabditel implements ASnabditel {
-  constructor(private root: Snabditel, private ctx: Ctx) {}
+  /* Engine — protected so subclasses (AlsSnabditel) can call it directly. */
 
-  resolve<T>(token: Token<T>): Promise<T> {
-    return this.root._resolveIn(token, this.ctx);
-  }
+  protected resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> { /* see flow below */ }
 
-  // Nested run() = fresh scope, but frame inherited so cycle detection
-  // spans the run boundary (matches AlsSnabditel current behavior).
-  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
-    const ctx: Ctx = { scope: new Map(), frame: this.ctx.frame };
-    return this.root._runWithBoundScope(ctx, cb);
-  }
+  /* Closure factory for the per-scope resolver `s` */
 
-  seed<T>(
-    token: string | symbol | (new (...args: any[]) => T),
-    value: T,
-    options: SeedOptions = {},
-  ): void {
-    return this.root._seedWith(token, value, options, this.ctx.scope);
+  private makeScoped(ctx: Ctx): ASnabditel {
+    return {
+      resolve: <T>(token: Token<T>) => this.resolveIn(token, ctx),
+
+      seed: <T>(token, value, options: SeedOptions = {}) => {
+        const which = options.injectionScope ?? "singleton";
+        if (which === "singleton") { this.singletons.set(token, value); return; }
+        if (which === "scoped") {
+          if (!ctx.scope) throw new Error("Scoped seed requires an active run() scope");
+          ctx.scope.set(token, value);
+          return;
+        }
+        throw new Error("Cannot seed a transient value");
+      },
+
+      run: <T>(cb: (s: ASnabditel) => Promise<T>) => {
+        // Fresh scope; inherit current frame.
+        const child: Ctx = { scope: new Map(), frame: ctx.frame };
+        return this.wrapAsync(child, () => cb(this.makeScoped(child)));
+      },
+    };
   }
 }
 ```
 
-`ScopedSnabditel` is not exported; only typed externally as `ASnabditel`.
+`s` is a plain object literal — not exported, not a class, no `ScopedSnabditel` type. Externally typed only as `ASnabditel`.
 
-### `_resolveIn(token, ctx)` flow
+### `resolveIn(token, ctx)` flow
 
 Mirrors current `als.ts` `resolve` shape:
 
@@ -183,9 +181,9 @@ Mirrors current `als.ts` `resolve` shape:
 
 1. `assertNoCycle(token, ctx.frame)`.
 2. `frame: Frame = { ownerToken: token, declared: scopeOf(token), minScope: 'singleton', parent: ctx.frame }`.
-3. `childCtx: Ctx = { scope: ctx.scope, frame }`. `childS = new ScopedSnabditel(this, childCtx)`.
+3. `childCtx: Ctx = { scope: ctx.scope, frame }`. `childS = this.makeScoped(childCtx)`.
 4. Register `pending: Promise<BuildResult<T>>` in `inflight` keyed by token. Suppress unhandled-rejection on it.
-5. `value = await this._runInChildCtx(childCtx, () => this.build(token, childS))`. Where `build` calls `token.createInstance(childS)` for `SelfResolvable`, `new token()` for newable.
+5. `value = await this.wrapAsync(childCtx, () => this.build(token, childS))`. Where `build` calls `token.createInstance(childS)` for `SelfResolvable`, `new token()` for newable. The `wrapAsync` call ensures the ALS variant pushes `childCtx` onto its store, so any `await di.resolve(...)` inside `createInstance` (without using `s`) sees the correct frame.
 6. **Validation**: if `declared !== undefined && isWider(declared, frame.minScope)` → `mismatchError(token, declared, frame.minScope)`.
 7. `effective = declared ?? frame.minScope`.
 8. **Place into cache**:
@@ -203,10 +201,10 @@ bubble(result.effectiveScope, ctx.frame);
 if (result.effectiveScope === "singleton") return result.value;
 if (result.effectiveScope === "scoped") {
   if (ctx.scope === result.builtInScope) return result.value;
-  return this._resolveIn(token, ctx);   // restart in our scope
+  return this.resolveIn(token, ctx);   // restart in our scope
 }
 // transient → restart so each caller gets its own fresh instance.
-return this._resolveIn(token, ctx);
+return this.resolveIn(token, ctx);
 ```
 
 ### Helpers (move from current `als.ts` into `snabditel.ts`)
@@ -221,46 +219,28 @@ For scoped tokens, `waiter` falls through to a restart when `ctx.scope !== resul
 
 ## ALS adapter (`src/als.ts`)
 
+ALS variant overrides only the two `protected` hooks. No `super` calls into `_underscore` methods, no leaky parameters, no shadowing of public surface.
+
 ```ts
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export class AlsSnabditel extends Snabditel {
   private ctxAls = new AsyncLocalStorage<Ctx>();
 
-  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
-    const outer = this.ctxAls.getStore();
-    // Fresh scope; inherit current frame so cycle detection survives nested run().
-    const ctx: Ctx = { scope: new Map(), frame: outer?.frame ?? null };
-    return this.ctxAls.run(ctx, () => super._runWithBoundScope(ctx, cb));
+  protected outerCtx(): Ctx {
+    return this.ctxAls.getStore() ?? { scope: null, frame: null };
   }
 
-  resolve<T>(token: Token<T>): Promise<T> {
-    const ctx = this.ctxAls.getStore() ?? { scope: null, frame: null };
-    return this._resolveIn(token, ctx);
-  }
-
-  seed<T>(
-    token: string | symbol | (new (...args: any[]) => T),
-    value: T,
-    options: SeedOptions = {},
-  ): void {
-    const scope =
-      options.injectionScope === "scoped"
-        ? (this.ctxAls.getStore()?.scope ?? null)
-        : null;
-    return this._seedWith(token, value, options, scope);
-  }
-
-  protected _runInChildCtx<T>(ctx: Ctx, fn: () => Promise<T>): Promise<T> {
+  protected wrapAsync<T>(ctx: Ctx, fn: () => Promise<T>): Promise<T> {
     return this.ctxAls.run(ctx, fn);
   }
 }
 ```
 
-ALS variant adds two behaviors on top of base:
+Behavior:
 
-1. `run()` wraps callback in `ctxAls.run(ctx, ...)` so descendant async work picks up `ctx` automatically.
-2. `_runInChildCtx` overrides to push the per-build child ctx onto ALS, so `await di.resolve(Foo)` calls inside `createInstance` (without using `s`) still see correct `frame` for cycle/inheritance/validation.
+1. `outerCtx()` returns the current ALS-stored ctx, so base `resolve`, `seed`, and `run` all see the current scope/frame without explicit `s` threading.
+2. `wrapAsync(ctx, fn)` pushes `ctx` onto ALS for the duration of `fn`. Base calls it around (a) the user callback in `run()` and (b) every per-build `createInstance` invocation. So nested `di.resolve(...)` inside `createInstance` (without using `s`) sees the correct frame for cycle/inheritance/validation.
 
 Existing ALS users with `createInstance() { return new X(await di.resolve(...)); }` keep working: TS sees `createInstance(s: ASnabditel)` but they ignore the arg.
 
@@ -327,9 +307,9 @@ Update to reflect new `SelfResolvable.createInstance(s: ASnabditel)` and `Scopea
 
 ## File layout
 
-- `src/snabditel.ts` — `Snabditel`, internal `ScopedSnabditel`, all helpers, `Ctx`/`Frame`/`BuildResult` types.
+- `src/snabditel.ts` — `Snabditel`, private `makeScoped(ctx)` closure factory, all helpers, `Ctx`/`Frame`/`BuildResult` types.
 - `src/snabditel.types.ts` — updated `ASnabditel`, `SelfResolvable`, `Scopeable`.
-- `src/als.ts` — slim `AlsSnabditel extends Snabditel` overriding `run`, `resolve`, `seed`, `runInChildCtx`.
+- `src/als.ts` — slim `AlsSnabditel extends Snabditel` overriding only `outerCtx()` and `wrapAsync(ctx, fn)`.
 - `src/snabditel.test.ts` — replaced; absorbs ALS-independent black-box cases.
 - `src/als.test.ts` — slimmed to ALS-specific behavior.
 - `src/types.test-d.ts` — updated signatures.
