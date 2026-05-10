@@ -56,3 +56,35 @@ await di.run(async () => {
 ```
 
 `UserService` declares its deps via `createInstance` — `Logger` resolves automatically. `scoped` means each `run()` (e.g. each request) gets a fresh `UserService`; `Logger` stays singleton.
+
+## Recipes
+
+### Express
+
+Wrap each request in a fresh DI scope using `AlsSnabditel`.
+
+```ts
+import express from "express";
+import { AlsSnabditel } from "snabditel/als";
+
+const di = new AlsSnabditel();
+
+class UserService {
+  static readonly injectionScope = "scoped" as const;
+  static createInstance() { return new UserService(); }
+  list() { return [{ id: 1, name: "ada" }]; }
+}
+
+const app = express();
+
+app.use((_req, _res, next) => {
+  di.run(async () => next());
+});
+
+app.get("/users", async (_req, res) => {
+  const users = await di.resolve(UserService);
+  res.json(users.list());
+});
+
+app.listen(3000);
+```
