@@ -278,7 +278,7 @@ describe("Snabditel", () => {
       }
     }
     const di = new Snabditel();
-    await expect(di.resolve(A)).rejects.toThrow(/Cycle detected/);
+    await (expect(di.resolve(A)).rejects.toThrow(/Cycle detected/) as unknown as Promise<void>);
   });
 
   test("cross-run singleton race: same instance, single createInstance call", async () => {
@@ -335,7 +335,7 @@ describe("Snabditel", () => {
       }
     }
     const di = new Snabditel();
-    await expect(di.resolve(A)).rejects.toThrow(/Cycle detected/);
+    await (expect(di.resolve(A)).rejects.toThrow(/Cycle detected/) as unknown as Promise<void>);
   });
 
   test("captured s after run() end keeps using the captured scope map", async () => {
