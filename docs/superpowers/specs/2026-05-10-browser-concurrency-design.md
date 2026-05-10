@@ -330,25 +330,45 @@ Update to reflect new `SelfResolvable.createInstance(s: ASnabditel)` and `Scopea
 
 ### TanStack Start
 
+Register the DI scope as **global request middleware** in `src/start.ts`. This wraps every request (server routes, SSR, server functions) in a fresh `di.run` scope. ALS propagates `s` implicitly, so handlers keep using module-level `di.resolve(...)`.
+
 ```ts
-import { createMiddleware } from "@tanstack/react-start";
-import { createFileRoute } from "@tanstack/react-router";
+// src/di.ts
 import { AlsSnabditel } from "snabditel/als";
 
-const di = new AlsSnabditel();
+export const di = new AlsSnabditel();
 
-class UserService {
+export class UserService {
   static readonly injectionScope = "scoped" as const;
   static createInstance() { return new UserService(); }
   list() { return [{ id: 1 }]; }
 }
-
-export const diMiddleware = createMiddleware().server(({ next }) =>
-  di.run((_s) => next()),   // ALS propagates; _s unused
-);
 ```
 
-Handler keeps `await di.resolve(UserService)` since ALS still works.
+```ts
+// src/start.ts
+import { createStart, createMiddleware } from "@tanstack/react-start";
+import { di } from "./di";
+
+const diMiddleware = createMiddleware().server(({ next }) =>
+  di.run((_s) => next()),   // ALS propagates ctx; _s unused inside next()
+);
+
+export const startInstance = createStart(() => ({
+  requestMiddleware: [diMiddleware],
+}));
+```
+
+Handlers anywhere in the app:
+
+```ts
+// any server route, server function, or loader
+import { di, UserService } from "./di";
+
+const users = await di.resolve(UserService);   // sees the request's scope via ALS
+```
+
+Use `functionMiddleware` instead of `requestMiddleware` to limit the scope to server-function calls only.
 
 ### React + React Query (replaces current section)
 
