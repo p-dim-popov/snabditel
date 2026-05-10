@@ -19,3 +19,40 @@ Tiny async DI for TypeScript. Zero deps.
 - **Scope inference + validation.** Effective scope = narrowest dep. Mismatches throw at first resolve.
 - **Cycle detection.** Caught at resolve time.
 - **TS types built-in. ESM + CJS.**
+
+## Install
+
+```bash
+npm install snabditel
+pnpm add snabditel
+yarn add snabditel
+bun add snabditel
+```
+
+## Quick start
+
+```ts
+import { Snabditel } from "snabditel";
+
+const di = new Snabditel();
+
+class Logger {
+  info(msg: string) { console.log(msg); }
+}
+
+class UserService {
+  static readonly injectionScope = "scoped";
+  static async createInstance() {
+    return new UserService(await di.resolve(Logger));
+  }
+  constructor(private logger: Logger) {}
+  greet(name: string) { this.logger.info(`hello ${name}`); }
+}
+
+await di.run(async () => {
+  const users = await di.resolve(UserService);
+  users.greet("ada");
+});
+```
+
+`UserService` declares its deps via `createInstance` — `Logger` resolves automatically. `scoped` means each `run()` (e.g. each request) gets a fresh `UserService`; `Logger` stays singleton.
