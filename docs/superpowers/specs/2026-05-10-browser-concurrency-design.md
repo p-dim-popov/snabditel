@@ -81,6 +81,10 @@ type BuildResult<T> = {
   effectiveScope: InjectionScope;
   builtInScope: Scope | null;
 };
+
+// Frozen singleton for the no-active-scope ctx; avoids allocating a
+// fresh `{ scope: null, frame: null }` on every outerCtx() hit.
+const EMPTY_CTX: Ctx = Object.freeze({ scope: null, frame: null });
 ```
 
 ### Class layout
@@ -95,9 +99,9 @@ export class Snabditel implements ASnabditel {
 
   /* Hooks (subclasses override) */
 
-  /** Outer-level context. ALS variant returns the ALS-stored ctx; base = empty. */
+  /** Outer-level context. ALS variant returns the ALS-stored ctx; base = EMPTY_CTX. */
   protected outerCtx(): Ctx {
-    return { scope: null, frame: null };
+    return EMPTY_CTX;
   }
 
   /** Wrap an async region in subclass context machinery. Base = pass-through. */
@@ -228,7 +232,7 @@ export class AlsSnabditel extends Snabditel {
   private ctxAls = new AsyncLocalStorage<Ctx>();
 
   protected outerCtx(): Ctx {
-    return this.ctxAls.getStore() ?? { scope: null, frame: null };
+    return this.ctxAls.getStore() ?? EMPTY_CTX;
   }
 
   protected wrapAsync<T>(ctx: Ctx, fn: () => Promise<T>): Promise<T> {
