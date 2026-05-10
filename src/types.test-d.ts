@@ -4,7 +4,7 @@
 
 import { Snabditel } from "./snabditel";
 import { AlsSnabditel } from "./als";
-import type { SelfResolvable } from "./snabditel.types";
+import type { ASnabditel, SelfResolvable } from "./snabditel.types";
 
 async function _readmeQuickstart() {
   const di = new Snabditel();
@@ -158,4 +158,35 @@ async function _resolveTypeInference() {
   };
   const v: { y: string } = await di.resolve(r);
   void v.y;
+}
+
+async function _scopedResolverArg() {
+  const di = new Snabditel();
+  class AuthToken {
+    static readonly injectionScope = "scoped";
+    static createInstance() { return new AuthToken(); }
+    value = "x";
+  }
+  class Api {
+    static readonly injectionScope = "transient";
+    static async createInstance(s: ASnabditel) {
+      return new Api(await s.resolve(AuthToken));
+    }
+    constructor(public auth: AuthToken) {}
+  }
+  await di.run(async (s) => {
+    const a: Api = await s.resolve(Api);
+    void a.auth.value;
+  });
+}
+
+async function _runCallbackReceivesScopedResolver() {
+  const di = new Snabditel();
+  await di.run(async (s) => {
+    const v = await s.resolve<{ x: number }>("X");
+    void v.x;
+  });
+  await new AlsSnabditel().run(async () => {
+    // ALS variant lets you ignore s entirely.
+  });
 }
