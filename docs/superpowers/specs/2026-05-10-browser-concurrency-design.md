@@ -1,0 +1,490 @@
+# Browser-safe concurrency for Snabditel
+
+Date: 2026-05-10
+
+## Motivation
+
+`Snabditel` (base) is single-flight: nested or parallel `run()` throws. Users who want concurrent scopes must use `AlsSnabditel`, which depends on `node:async_hooks` and is therefore node-only.
+
+Goal: make the base container support truly parallel `run()` scopes, browser-safe, with no `node:async_hooks` dependency. Achieved by making the active scope an explicit by-value resolver passed to the `run()` callback and to `createInstance`. ALS variant remains for users who want implicit propagation.
+
+## Goals
+
+- Parallel `run()` scopes work in the browser without ALS, without polyfills, without `AsyncContext`.
+- Scope inheritance and lifetime validation parity with current `AlsSnabditel`.
+- Two classes: `Snabditel` (browser-safe, default export) and `AlsSnabditel` (subpath `snabditel/als`, layers ALS on top).
+- ALS users keep current ergonomics: callback `s` arg can be ignored; `await di.resolve(...)` inside `createInstance` keeps working.
+
+## Non-goals
+
+- `AsyncContext` (TC39 stage-3) integration. Future work, opt-in subpath if and when adopted.
+- Zone.js or third-party context propagation.
+- Backward compatibility with current single-flight base behavior or current `SelfResolvable.createInstance(): T` no-arg signature. Both are intentional breaking changes.
+
+## API changes
+
+### `snabditel.types.ts`
+
+```ts
+export type Resolver = {
+  resolve<T>(token: Token<T>): Promise<T>;
+};
+
+export type SelfResolvable<T> = {
+  // Resolver always passed; ALS users free to ignore the arg.
+  createInstance(s: ASnabditel): T | Promise<T>;
+  injectionScope?: InjectionScope;
+};
+
+export type Scopeable = {
+  // Callback receives a scope-bound resolver. Browser variant requires its
+  // use for scoped resolution; ALS variant works either way.
+  run<T>(callback: (s: ASnabditel) => Promise<T>): Promise<T>;
+};
+
+// ASnabditel = Resolver & Seeder & Scopeable, unchanged otherwise.
+```
+
+`NewableResolvable<T> = new () => T` is unchanged (no-arg ctor). Newables stay no-deps; non-trivial wiring uses `SelfResolvable`.
+
+### Classes
+
+Two classes total in main entrypoint:
+
+- `Snabditel` (default export): browser-safe, parallel scopes, scope inheritance + validation, no `node:async_hooks`.
+- `ScopedSnabditel` (internal, not exported): implements `ASnabditel`, returned to consumers only via the `s` argument.
+
+`AlsSnabditel` stays in subpath `snabditel/als` (§ ALS adapter).
+
+## Internals
+
+### Resolution context
+
+```ts
+type Key = unknown;
+type Scope = Map<Key, unknown>;
+
+type Ctx = {
+  scope: Scope | null;      // null = no run() active
+  frame: Frame | null;      // current resolution frame chain
+};
+
+type Frame = {
+  ownerToken: Resolvable<unknown>;
+  declared: InjectionScope | undefined;
+  minScope: InjectionScope;
+  parent: Frame | null;
+};
+
+type BuildResult<T> = {
+  value: T;
+  effectiveScope: InjectionScope;
+  builtInScope: Scope | null;
+};
+```
+
+### Class layout
+
+```ts
+export class Snabditel implements ASnabditel {
+  private singletons: Scope = new Map();
+  // Single root-level inflight map shared across all scopes; keyed by token.
+  private inflight = new Map<Key, Promise<BuildResult<unknown>>>();
+
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    const ctx: Ctx = { scope: new Map(), frame: null };
+    return this._runWithBoundScope(ctx, cb);
+  }
+
+  /** @internal — public on class; called by AlsSnabditel.run and ScopedSnabditel.run */
+  _runWithBoundScope<T>(
+    ctx: Ctx,
+    cb: (s: ASnabditel) => Promise<T>,
+  ): Promise<T> {
+    const s = new ScopedSnabditel(this, ctx);
+    return cb(s);
+  }
+
+  resolve<T>(token: Token<T>): Promise<T> {
+    return this._resolveIn(token, { scope: null, frame: null });
+  }
+
+  seed<T>(
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions = {},
+  ): void {
+    return this._seedWith(token, value, options, null);
+  }
+
+  /** @internal — overridden by AlsSnabditel to wrap in ctxAls.run */
+  protected _runInChildCtx<T>(_ctx: Ctx, fn: () => Promise<T>): Promise<T> {
+    return fn();
+  }
+
+  /** @internal — public on class so ScopedSnabditel can delegate; not on ASnabditel interface */
+  _resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> { /* ... */ }
+
+  /** @internal — public on class so ScopedSnabditel can delegate; not on ASnabditel interface */
+  _seedWith<T>(
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions,
+    alsScope: Scope | null,
+  ): void {
+    const injectionScope = options.injectionScope ?? "singleton";
+    if (injectionScope === "singleton") { this.singletons.set(token, value); return; }
+    if (injectionScope === "scoped") {
+      if (!alsScope) throw new Error("Scoped seed requires an active run() scope");
+      alsScope.set(token, value);
+      return;
+    }
+    throw new Error("Cannot seed a transient value");
+  }
+}
+
+class ScopedSnabditel implements ASnabditel {
+  constructor(private root: Snabditel, private ctx: Ctx) {}
+
+  resolve<T>(token: Token<T>): Promise<T> {
+    return this.root._resolveIn(token, this.ctx);
+  }
+
+  // Nested run() = fresh scope, but frame inherited so cycle detection
+  // spans the run boundary (matches AlsSnabditel current behavior).
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    const ctx: Ctx = { scope: new Map(), frame: this.ctx.frame };
+    return this.root._runWithBoundScope(ctx, cb);
+  }
+
+  seed<T>(
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions = {},
+  ): void {
+    return this.root._seedWith(token, value, options, this.ctx.scope);
+  }
+}
+```
+
+`ScopedSnabditel` is not exported; only typed externally as `ASnabditel`.
+
+### `_resolveIn(token, ctx)` flow
+
+Mirrors current `als.ts` `resolve` shape:
+
+1. **String/symbol token**: read from `ctx.scope` (if present) then `singletons`. Bubble source onto `ctx.frame`. Return.
+2. **Singleton cache hit**: bubble `singleton`; return cached value.
+3. **Scoped cache hit** (`ctx.scope?.has(token)`): bubble `scoped`; return cached.
+4. **In-flight hit** (`inflight.has(token)`): cycle-check against `ctx.frame`, hand off to `waiter(token, pending, ctx)`.
+5. **Otherwise**: `builder(token, ctx)`.
+
+### `builder(token, ctx)`
+
+1. `assertNoCycle(token, ctx.frame)`.
+2. `frame: Frame = { ownerToken: token, declared: scopeOf(token), minScope: 'singleton', parent: ctx.frame }`.
+3. `childCtx: Ctx = { scope: ctx.scope, frame }`. `childS = new ScopedSnabditel(this, childCtx)`.
+4. Register `pending: Promise<BuildResult<T>>` in `inflight` keyed by token. Suppress unhandled-rejection on it.
+5. `value = await this._runInChildCtx(childCtx, () => this.build(token, childS))`. Where `build` calls `token.createInstance(childS)` for `SelfResolvable`, `new token()` for newable.
+6. **Validation**: if `declared !== undefined && isWider(declared, frame.minScope)` → `mismatchError(token, declared, frame.minScope)`.
+7. `effective = declared ?? frame.minScope`.
+8. **Place into cache**:
+   - `singleton` → `singletons.set(token, value)`.
+   - `scoped` → require `ctx.scope`. If absent: throw `effectiveScopedNoRunError(token)` when inferred, generic `"Scoped resolution requires an active run() scope"` when declared.
+   - `transient` → no cache.
+9. `bubble(effective, ctx.frame)`.
+10. Settle pending with `{ value, effectiveScope: effective, builtInScope: ctx.scope }`. Clear from `inflight`.
+
+### `waiter(token, pending, ctx)` (mirrors `als.ts`)
+
+```ts
+const result = await pending;
+bubble(result.effectiveScope, ctx.frame);
+if (result.effectiveScope === "singleton") return result.value;
+if (result.effectiveScope === "scoped") {
+  if (ctx.scope === result.builtInScope) return result.value;
+  return this._resolveIn(token, ctx);   // restart in our scope
+}
+// transient → restart so each caller gets its own fresh instance.
+return this._resolveIn(token, ctx);
+```
+
+### Helpers (move from current `als.ts` into `snabditel.ts`)
+
+`narrower`, `isWider`, `scopeOf`, `ownerName`, `assertNoCycle`, `bubble`, `mismatchError`, `effectiveScopedNoRunError`. All become private methods on `Snabditel`.
+
+### Cross-run singleton dedupe
+
+Single root-level `inflight` map. Two parallel `run()`s racing on the same uncached singleton: the first call to `resolveIn` for that token registers `pending`; the second observes it and `waiter`s. After settle, value is cached in `singletons`. Subsequent resolves from any scope hit the cache.
+
+For scoped tokens, `waiter` falls through to a restart when `ctx.scope !== result.builtInScope`, so a parallel sibling scope correctly builds its own instance.
+
+## ALS adapter (`src/als.ts`)
+
+```ts
+import { AsyncLocalStorage } from "node:async_hooks";
+
+export class AlsSnabditel extends Snabditel {
+  private ctxAls = new AsyncLocalStorage<Ctx>();
+
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    const outer = this.ctxAls.getStore();
+    // Fresh scope; inherit current frame so cycle detection survives nested run().
+    const ctx: Ctx = { scope: new Map(), frame: outer?.frame ?? null };
+    return this.ctxAls.run(ctx, () => super._runWithBoundScope(ctx, cb));
+  }
+
+  resolve<T>(token: Token<T>): Promise<T> {
+    const ctx = this.ctxAls.getStore() ?? { scope: null, frame: null };
+    return this._resolveIn(token, ctx);
+  }
+
+  seed<T>(
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions = {},
+  ): void {
+    const scope =
+      options.injectionScope === "scoped"
+        ? (this.ctxAls.getStore()?.scope ?? null)
+        : null;
+    return this._seedWith(token, value, options, scope);
+  }
+
+  protected _runInChildCtx<T>(ctx: Ctx, fn: () => Promise<T>): Promise<T> {
+    return this.ctxAls.run(ctx, fn);
+  }
+}
+```
+
+ALS variant adds two behaviors on top of base:
+
+1. `run()` wraps callback in `ctxAls.run(ctx, ...)` so descendant async work picks up `ctx` automatically.
+2. `_runInChildCtx` overrides to push the per-build child ctx onto ALS, so `await di.resolve(Foo)` calls inside `createInstance` (without using `s`) still see correct `frame` for cycle/inheritance/validation.
+
+Existing ALS users with `createInstance() { return new X(await di.resolve(...)); }` keep working: TS sees `createInstance(s: ASnabditel)` but they ignore the arg.
+
+## Error catalog
+
+| Trigger | Message |
+|---|---|
+| String/symbol token not seeded | `Unknown token: <t>. String and symbol tokens must be seeded before resolution.` |
+| Scoped seed outside `run()` | `Scoped seed requires an active run() scope` |
+| Transient seed | `Cannot seed a transient value` |
+| Declared `scoped` resolve outside `run()` | `Scoped resolution requires an active run() scope` |
+| Inferred-scoped resolve outside `run()` | `<Owner> effective scope is 'scoped' (inherited from a scoped dependency) but no run() scope is active.` |
+| Declared wider than narrowest dep | `` Cannot resolve <Owner> as <declared>: depends on a <min> service. Either remove `injectionScope` to inherit '<min>', or set it to '<min>' or 'transient'. `` |
+| Cycle | `Cycle detected during resolution` |
+
+Removed: `run() already active — concurrent scopes require AlsSnabditel` (base now handles concurrency).
+
+## Test plan
+
+### `src/snabditel.test.ts` (replaces existing)
+
+Becomes the primary black-box suite for the browser-safe core. Drop the current "run already active throws" test. Move applicable cases from `als.test.ts`:
+
+- Singleton/scoped/transient placement and caching.
+- Scope inheritance from narrowest dep when `injectionScope` omitted.
+- Validation: declared wider than dep throws `mismatchError`.
+- Validation: inferred-scoped resolve outside `run()` throws `effectiveScopedNoRunError`.
+- Validation: declared-scoped resolve outside `run()` throws generic scoped error.
+- Cycle detection via parent frame chain.
+- Single-flight `inflight` dedupe within a scope.
+- Scoped seeds shadow singletons inside `run()`.
+- Transient seed throws.
+- Newable resolution (no-arg ctor classes).
+
+New cases:
+
+- **Parallel run isolation**: `Promise.all([di.run(s => ...), di.run(s => ...)])` — each scope sees its own scoped values, no cross-contamination, singletons shared.
+- **Nested run scope reset, frame preserved**: `s.run(cb2)` inside outer `cb` creates a fresh scope (no scoped value inheritance) but preserves the outer frame chain so cycle detection still triggers if `cb2` resolves a token already on the parent build path.
+- **Captured-`s` after run end**: capture `s` from one run, use after `run()` resolves. Singleton resolves still work; scoped resolves still use the captured (now-stale) scope map. Documents `s`-as-value semantics.
+- **Cross-run singleton race**: two parallel runs both miss a singleton; only one `createInstance` call observed; both get the same instance.
+- **Propagation through `createInstance(s)`**: deep dep tree (singleton → scoped → transient) using `s` arg threading. Verify each layer gets correct cached/fresh instance.
+- **Browser-safety static check**: `src/snabditel.ts` does not import `node:async_hooks` (grep test in suite).
+
+### `src/als.test.ts` (slimmed)
+
+Keep only ALS-specific behavior:
+
+- `createInstance` doing `await di.resolve(Foo)` (no `s` arg) works — implicit propagation.
+- Parallel `di.run`s with no explicit `s` threading — scoped values isolated.
+- `di.seed(t, v, { injectionScope: "scoped" })` outside `run()` throws; inside, writes to ALS-current scope.
+- Cycle/validation tests that specifically rely on `frameAls` propagation.
+
+### `src/types.test-d.ts`
+
+Update to reflect new `SelfResolvable.createInstance(s: ASnabditel)` and `Scopeable.run(cb: (s: ASnabditel) => Promise<T>)`.
+
+## Migration impact
+
+- **Breaking**: `SelfResolvable.createInstance` gains required `s` arg.
+  - Base users: must update signatures. Most existing examples already do `await di.resolve(...)` from a module-level `di`; they need to switch to `await s.resolve(...)` for scoped correctness.
+  - ALS users: TS-level break only. Runtime keeps working with `s` ignored.
+- **Behavioral upgrade (non-breaking)**: base `Snabditel.run` is no longer single-flight. Nested/parallel `run` no longer throws.
+- **Surface**: `seed` and `resolve` signatures unchanged.
+
+## File layout
+
+- `src/snabditel.ts` — `Snabditel`, internal `ScopedSnabditel`, all helpers, `Ctx`/`Frame`/`BuildResult` types.
+- `src/snabditel.types.ts` — updated `ASnabditel`, `SelfResolvable`, `Scopeable`.
+- `src/als.ts` — slim `AlsSnabditel extends Snabditel` overriding `run`, `resolve`, `seed`, `runInChildCtx`.
+- `src/snabditel.test.ts` — replaced; absorbs ALS-independent black-box cases.
+- `src/als.test.ts` — slimmed to ALS-specific behavior.
+- `src/types.test-d.ts` — updated signatures.
+- `README.md` — sections updated per below.
+
+## README updates
+
+### Tagline (line 11)
+
+```
+- `Snabditel` — explicit-scope `run()`, browser-safe, parallel scopes.
+- `AlsSnabditel` — `AsyncLocalStorage`-backed propagation; node-only.
+```
+
+### TanStack Start
+
+```ts
+import { createMiddleware } from "@tanstack/react-start";
+import { createFileRoute } from "@tanstack/react-router";
+import { AlsSnabditel } from "snabditel/als";
+
+const di = new AlsSnabditel();
+
+class UserService {
+  static readonly injectionScope = "scoped" as const;
+  static createInstance() { return new UserService(); }
+  list() { return [{ id: 1 }]; }
+}
+
+export const diMiddleware = createMiddleware().server(({ next }) =>
+  di.run((_s) => next()),   // ALS propagates; _s unused
+);
+```
+
+Handler keeps `await di.resolve(UserService)` since ALS still works.
+
+### React + React Query (replaces current section)
+
+Browser side. Each `queryFn` opens its own `di.run(s => ...)`. `Api` is `transient` to demonstrate scope propagation; `AuthToken` is `scoped` so all transients in one query share the same auth view.
+
+```ts
+// di.ts
+import { Snabditel, type ASnabditel } from "snabditel";
+
+export const di = new Snabditel();
+
+export class AppConfig {
+  static createInstance() {
+    return new AppConfig({ backendUrl: import.meta.env.VITE_BACKEND_URL });
+  }
+  constructor(private cfg: { backendUrl: string }) {}
+  get backendUrl() { return this.cfg.backendUrl; }
+}
+
+export class AuthToken {
+  static readonly injectionScope = "scoped" as const;
+  static async createInstance() {
+    return new AuthToken(await loadToken());
+  }
+  constructor(public value: string) {}
+}
+
+export class Api {
+  static readonly injectionScope = "transient" as const;
+  static async createInstance(s: ASnabditel) {
+    return new Api(await s.resolve(AppConfig), await s.resolve(AuthToken));
+  }
+  constructor(private config: AppConfig, private auth: AuthToken) {}
+  async request(path: string, init?: RequestInit) {
+    return fetch(`${this.config.backendUrl}${path}`, {
+      ...init,
+      headers: { ...init?.headers, Authorization: `Bearer ${this.auth.value}` },
+    });
+  }
+}
+
+export class UsersClient {
+  // No injectionScope → inferred transient (narrowest dep = Api).
+  static async createInstance(s: ASnabditel) {
+    return new UsersClient(await s.resolve(Api));
+  }
+  constructor(private api: Api) {}
+  list() { return this.api.request("/users").then((r) => r.json()); }
+}
+```
+
+```ts
+// users.queries.ts
+import { queryOptions } from "@tanstack/react-query";
+import { di, UsersClient } from "./di";
+
+export const usersQueryOptions = queryOptions({
+  queryKey: ["users"],
+  queryFn: () =>
+    di.run(async (s) => {
+      const users = await s.resolve(UsersClient);
+      return users.list();
+    }),
+});
+```
+
+```tsx
+// Users.tsx
+import { useQuery } from "@tanstack/react-query";
+import { usersQueryOptions } from "./users.queries";
+
+export function Users() {
+  const { data } = useQuery(usersQueryOptions);
+  return <ul>{data?.map((u: any) => <li key={u.id}>{u.name}</li>)}</ul>;
+}
+```
+
+Propagation: `queryFn` opens scope → `s.resolve(UsersClient)` → `UsersClient.createInstance(s)` → `s.resolve(Api)` → `Api.createInstance(s)` → `s.resolve(AppConfig)` (singleton, root cache) + `s.resolve(AuthToken)` (scoped, cached on `s`). Two parallel `useQuery`s = two parallel `di.run`s = two isolated `AuthToken`s. `Api` rebuilt each resolve (transient). All in browser, no `node:async_hooks`.
+
+Drop the closing caveat about swapping to `AlsSnabditel` for browser scoping.
+
+### Concurrent scopes (now base)
+
+Title shifts; example moves to base `Snabditel`:
+
+```ts
+import { Snabditel } from "snabditel";
+
+const di = new Snabditel();
+
+class RequestHandler {
+  static async createInstance(s: ASnabditel) {
+    return new RequestHandler(await s.resolve(Logger));
+  }
+  constructor(private logger: Logger) {}
+  async handle(req: Request) { /* ... */ }
+}
+
+await Promise.all([
+  di.run(async (s) => {
+    const h = await s.resolve(RequestHandler);
+    return h.handle(req1);
+  }),
+  di.run(async (s) => {
+    const h = await s.resolve(RequestHandler);
+    return h.handle(req2);
+  }),
+]);
+```
+
+Note: `AlsSnabditel` (subpath `snabditel/als`) extends this with implicit `s` propagation via `node:async_hooks`, so callbacks and `createInstance` may ignore the `s` arg.
+
+### API summary block
+
+```ts
+class Snabditel implements ASnabditel {
+  resolve<T>(token: Token<T>): Promise<T>;
+  seed<T>(token: string | symbol | (new (...a: any[]) => T), value: T, options?: { injectionScope?: InjectionScope }): void;
+  run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T>;
+}
+
+class AlsSnabditel implements ASnabditel {} // ALS-backed run() — s arg optional in practice; same inheritance + validation
+```
