@@ -411,3 +411,15 @@ await di.run(async () => {
 ```
 
 Scoped seeds shadow singleton seeds inside `run()`. A `transient` seed throws.
+
+## API
+
+```ts
+class Snabditel {
+  resolve<T>(token: Token<T>): Promise<T>;
+  seed<T>(token: string | symbol | (new (...a: any[]) => T), value: T, options?: { injectionScope?: InjectionScope }): void;
+  run<T>(cb: () => Promise<T>): Promise<T>;
+}
+
+class AlsSnabditel implements ASnabditel {} // ALS-backed run() + scope inheritance + validation
+```
