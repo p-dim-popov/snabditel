@@ -7,7 +7,6 @@ import type {
   SelfResolvable,
   Token,
 } from "./snabditel.types";
-import { readSeedToken, writeSeed } from "./internal/seed-helpers";
 
 type Key = unknown;
 type Scope = Map<Key, unknown>;
@@ -24,6 +23,8 @@ type BuildResult<T> = {
   effectiveScope: InjectionScope;
   builtInScope: Scope | null;
 };
+
+type SeedSource = "singleton" | "scoped";
 
 const RANK: Record<InjectionScope, number> = {
   transient: 0,
@@ -91,7 +92,7 @@ export class AlsSnabditel implements ASnabditel {
     value: T,
     options: SeedOptions = {},
   ): void {
-    writeSeed(this.singletons, () => this.scopeAls.getStore() ?? null, token, value, options);
+    this.writeSeed(token, value, options);
   }
 
   private bubble(scope: InjectionScope): void {
@@ -103,6 +104,46 @@ export class AlsSnabditel implements ASnabditel {
     if (frame.declared !== undefined && this.isWider(frame.declared, frame.minScope)) {
       throw this.mismatchError(frame.ownerToken, frame.declared, frame.minScope);
     }
+  }
+
+  private currentScope(): Scope | null {
+    return this.scopeAls.getStore() ?? null;
+  }
+
+  private writeSeed<T>(
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions = {},
+  ): void {
+    const injectionScope = options.injectionScope ?? "singleton";
+    if (injectionScope === "singleton") {
+      this.singletons.set(token, value);
+      return;
+    }
+    if (injectionScope === "scoped") {
+      const scope = this.currentScope();
+      if (!scope) {
+        throw new Error("Scoped seed requires an active run() scope");
+      }
+      scope.set(token, value);
+      return;
+    }
+    throw new Error("Cannot seed a transient value");
+  }
+
+  private async readSeedToken<T>(
+    token: string | symbol,
+  ): Promise<{ value: T; source: SeedSource }> {
+    const scope = this.currentScope();
+    if (scope?.has(token)) {
+      return { value: (await scope.get(token)) as T, source: "scoped" };
+    }
+    if (this.singletons.has(token)) {
+      return { value: (await this.singletons.get(token)) as T, source: "singleton" };
+    }
+    throw new Error(
+      `Unknown token: ${String(token)}. String and symbol tokens must be seeded before resolution.`,
+    );
   }
 
   private async build<T>(token: Resolvable<T>): Promise<T> {
@@ -149,7 +190,7 @@ export class AlsSnabditel implements ASnabditel {
         throw this.mismatchError(token, declared, frame.minScope);
       }
       const effective: InjectionScope = declared ?? frame.minScope;
-      const builtInScope = this.scopeAls.getStore() ?? null;
+      const builtInScope = this.currentScope();
 
       this.placeIntoCache(token, value, effective, builtInScope, declared);
       this.bubble(effective);
@@ -190,8 +231,7 @@ export class AlsSnabditel implements ASnabditel {
 
   async resolve<T>(token: Token<T>): Promise<T> {
     if (typeof token === "string" || typeof token === "symbol") {
-      const scope = this.scopeAls.getStore() ?? null;
-      const result = await readSeedToken<T>(this.singletons, scope, token);
+      const result = await this.readSeedToken<T>(token);
       this.bubble(result.source);
       return result.value;
     }
@@ -201,7 +241,7 @@ export class AlsSnabditel implements ASnabditel {
       return (await this.singletons.get(token)) as T;
     }
 
-    const currentScope = this.scopeAls.getStore() ?? null;
+    const currentScope = this.currentScope();
     if (currentScope?.has(token)) {
       this.bubble("scoped");
       return (await currentScope.get(token)) as T;
@@ -227,7 +267,7 @@ export class AlsSnabditel implements ASnabditel {
       return result.value;
     }
     if (result.effectiveScope === "scoped") {
-      if ((this.scopeAls.getStore() ?? null) === result.builtInScope) {
+      if (this.currentScope() === result.builtInScope) {
         return result.value;
       }
       return this.resolve(token);          // restart in our run
