@@ -218,4 +218,25 @@ describe("Snabditel", () => {
     expect(got.ok).toBe(true);
     expect(calls).toBe(2);
   });
+
+  test("parallel runs are isolated (browser-safe, no ALS)", async () => {
+    class RequestId {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new RequestId(); }
+      id = Math.random();
+    }
+    const di = new Snabditel();
+
+    const work = (delay: number) =>
+      di.run(async () => {
+        const a = await di.resolve(RequestId);
+        await new Promise((r) => setTimeout(r, delay));
+        const b = await di.resolve(RequestId);
+        expect(a).toBe(b);
+        return a;
+      });
+
+    const [r1, r2] = await Promise.all([work(20), work(5)]);
+    expect(r1).not.toBe(r2);
+  });
 });
