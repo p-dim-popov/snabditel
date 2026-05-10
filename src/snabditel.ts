@@ -32,7 +32,7 @@ export class Snabditel implements ASnabditel {
     throw new Error("Cannot seed a transient value");
   }
 
-  async run<T>(callback: () => Promise<T>): Promise<T> {
+  async run<T>(callback: (s: ASnabditel) => Promise<T>): Promise<T> {
     if (this.localScope) {
       throw new Error(
         "run() already active — concurrent scopes require AlsSnabditel",
@@ -40,7 +40,7 @@ export class Snabditel implements ASnabditel {
     }
     this.localScope = new Map();
     try {
-      return await callback();
+      return await callback(this);
     } finally {
       this.localScope = null;
     }
@@ -95,7 +95,7 @@ export class Snabditel implements ASnabditel {
 
   private async build<T>(binding: Resolvable<T>): Promise<T> {
     if ("createInstance" in binding) {
-      return await binding.createInstance();
+      return await binding.createInstance(this);
     }
     return new binding();
   }

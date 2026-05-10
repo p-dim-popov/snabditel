@@ -83,8 +83,8 @@ export class AlsSnabditel implements ASnabditel {
     );
   }
 
-  async run<T>(callback: () => Promise<T>): Promise<T> {
-    return this.scopeAls.run(new Map(), callback);
+  async run<T>(callback: (s: ASnabditel) => Promise<T>): Promise<T> {
+    return this.scopeAls.run(new Map(), () => callback(this));
   }
 
   seed<T>(
@@ -148,7 +148,7 @@ export class AlsSnabditel implements ASnabditel {
 
   private async build<T>(token: Resolvable<T>): Promise<T> {
     if ("createInstance" in token) {
-      return await token.createInstance();
+      return await token.createInstance(this);
     }
     return new (token as new () => T)();
   }

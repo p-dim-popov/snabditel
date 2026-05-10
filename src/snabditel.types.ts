@@ -1,7 +1,7 @@
 export type InjectionScope = "singleton" | "transient" | "scoped";
 
 export type SelfResolvable<T> = {
-  createInstance(): T | Promise<T>;
+  createInstance(s: ASnabditel): T | Promise<T>;
   injectionScope?: InjectionScope;
 };
 
@@ -28,7 +28,7 @@ export type Seeder = {
 };
 
 export type Scopeable = {
-  run<T>(callback: () => Promise<T>): Promise<T>;
+  run<T>(callback: (s: ASnabditel) => Promise<T>): Promise<T>;
 };
 
 export type ASnabditel = Resolver & Seeder & Scopeable;
