@@ -17,8 +17,8 @@ async function _readmeQuickstart() {
 
   class UserService {
     static readonly injectionScope = "scoped";
-    static async createInstance() {
-      const logger = await di.resolve(Logger);
+    static async createInstance(s: ASnabditel) {
+      const logger = await s.resolve(Logger);
       return new UserService(logger);
     }
 
@@ -29,8 +29,8 @@ async function _readmeQuickstart() {
     }
   }
 
-  await di.run(async () => {
-    const users = await di.resolve(UserService);
+  await di.run(async (s) => {
+    const users = await s.resolve(UserService);
     users.greet("ada");
   });
 }
@@ -71,9 +71,9 @@ async function _readmeRequestContext() {
     id = "abc";
   }
 
-  await di.run(async () => {
-    const a = await di.resolve(RequestContext);
-    const b = await di.resolve(RequestContext);
+  await di.run(async (s) => {
+    const a = await s.resolve(RequestContext);
+    const b = await s.resolve(RequestContext);
     void a.id;
     void b.id;
   });

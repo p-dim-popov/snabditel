@@ -15,7 +15,7 @@ Tiny async DI for TypeScript. Zero deps.
 - **Tiny.** ~2.4 kB minzipped.
 - **Async-first.** `resolve()` returns a Promise — no sync/async split.
 - **Three scopes.** `singleton`, `transient`, `scoped`.
-- **Concurrent-safe.** `AlsSnabditel` uses `AsyncLocalStorage` — parallel `run()` calls don't leak state.
+- **Concurrent-safe by default.** Base `Snabditel` supports parallel `run()` scopes via an explicit scope-bound resolver — works in the browser, no `node:async_hooks`. `AlsSnabditel` (subpath `snabditel/als`, node-only) adds implicit propagation for callers who want to skip threading the resolver.
 - **Scope inference + validation.** Effective scope = narrowest dep. Mismatches throw at first resolve.
 - **Cycle detection.** Caught at resolve time.
 - **TS types built-in. ESM + CJS.**
@@ -32,7 +32,7 @@ bun add snabditel
 ## Quick start
 
 ```ts
-import { Snabditel } from "snabditel";
+import { Snabditel, type ASnabditel } from "snabditel";
 
 const di = new Snabditel();
 
@@ -42,15 +42,15 @@ class Logger {
 
 class UserService {
   static readonly injectionScope = "scoped";
-  static async createInstance() {
-    return new UserService(await di.resolve(Logger));
+  static async createInstance(s: ASnabditel) {
+    return new UserService(await s.resolve(Logger));
   }
   constructor(private logger: Logger) {}
   greet(name: string) { this.logger.info(`hello ${name}`); }
 }
 
-await di.run(async () => {
-  const users = await di.resolve(UserService);
+await di.run(async (s) => {
+  const users = await s.resolve(UserService);
   users.greet("ada");
 });
 ```
@@ -91,45 +91,51 @@ app.listen(3000);
 
 ### TanStack Start
 
-Server middleware wraps `next()` in `di.run()`. Same `AlsSnabditel` pattern as Express.
+Register the DI scope as **global request middleware** in `src/start.ts`. This wraps every request (server routes, SSR, server functions) in a fresh `di.run` scope. ALS propagates the scope implicitly, so handlers keep using module-level `di.resolve(...)`.
 
 ```ts
-import { createMiddleware } from "@tanstack/react-start";
-import { createFileRoute } from "@tanstack/react-router";
+// src/di.ts
 import { AlsSnabditel } from "snabditel/als";
 
-const di = new AlsSnabditel();
+export const di = new AlsSnabditel();
 
-class UserService {
+export class UserService {
   static readonly injectionScope = "scoped" as const;
   static createInstance() { return new UserService(); }
   list() { return [{ id: 1 }]; }
 }
+```
 
-export const diMiddleware = createMiddleware().server(({ next }) =>
+```ts
+// src/start.ts
+import { createStart, createMiddleware } from "@tanstack/react-start";
+import { di } from "./di";
+
+const diMiddleware = createMiddleware().server(({ next }) =>
   di.run(() => next()),
 );
 
-export const Route = createFileRoute("/users")({
-  server: {
-    middleware: [diMiddleware],
-    handlers: {
-      GET: async () => {
-        const users = await di.resolve(UserService);
-        return Response.json(users.list());
-      },
-    },
-  },
-});
+export const startInstance = createStart(() => ({
+  requestMiddleware: [diMiddleware],
+}));
 ```
+
+```ts
+// any server route, server function, or loader
+import { di, UserService } from "./di";
+
+const users = await di.resolve(UserService); // sees the request's scope via ALS
+```
+
+Use `functionMiddleware` instead of `requestMiddleware` to limit the scope to server-function calls only.
 
 ### React + React Query
 
-Browser side. Base `Snabditel` with module-level singletons. No `run()` — base `Snabditel` is single-flight, and React Query fires queries in parallel. `Api` handles auth + base URL via `AppConfig`. `UsersClient` depends on `Api`. `useQuery` consumes `queryOptions` that resolve `UsersClient`.
+Browser side. Each `queryFn` opens its own `di.run(s => ...)` — concurrent runs are safe in base `Snabditel`. `Api` is `transient` to demonstrate scope propagation; `AuthToken` is `scoped` so all transient `Api` instances inside one query share the same auth view.
 
 ```ts
 // di.ts
-import { Snabditel } from "snabditel";
+import { Snabditel, type ASnabditel } from "snabditel";
 
 export const di = new Snabditel();
 
@@ -141,28 +147,35 @@ export class AppConfig {
   get backendUrl() { return this.cfg.backendUrl; }
 }
 
-export class Api {
+export class AuthToken {
+  static readonly injectionScope = "scoped" as const;
   static async createInstance() {
-    return new Api(await di.resolve(AppConfig));
+    return new AuthToken(await loadToken());
   }
-  constructor(private config: AppConfig) {}
+  constructor(public value: string) {}
+}
+
+export class Api {
+  static readonly injectionScope = "transient" as const;
+  static async createInstance(s: ASnabditel) {
+    return new Api(await s.resolve(AppConfig), await s.resolve(AuthToken));
+  }
+  constructor(private config: AppConfig, private auth: AuthToken) {}
   async request(path: string, init?: RequestInit) {
-    const token = await this.authToken();
     return fetch(`${this.config.backendUrl}${path}`, {
       ...init,
-      headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+      headers: { ...init?.headers, Authorization: `Bearer ${this.auth.value}` },
     });
   }
-  private async authToken() { /* lookup */ return ""; }
 }
 
 export class UsersClient {
-  static async createInstance() {
-    return new UsersClient(await di.resolve(Api));
+  // No injectionScope → inferred transient (narrowest dep = Api).
+  static async createInstance(s: ASnabditel) {
+    return new UsersClient(await s.resolve(Api));
   }
   constructor(private api: Api) {}
   list() { return this.api.request("/users").then((r) => r.json()); }
-  get(id: string) { return this.api.request(`/users/${id}`).then((r) => r.json()); }
 }
 ```
 
@@ -173,10 +186,11 @@ import { di, UsersClient } from "./di";
 
 export const usersQueryOptions = queryOptions({
   queryKey: ["users"],
-  queryFn: async () => {
-    const users = await di.resolve(UsersClient);
-    return users.list();
-  },
+  queryFn: () =>
+    di.run(async (s) => {
+      const users = await s.resolve(UsersClient);
+      return users.list();
+    }),
 });
 ```
 
@@ -191,7 +205,7 @@ export function Users() {
 }
 ```
 
-For per-query scoping in the browser, swap to `AlsSnabditel` and use a runtime that supports `AsyncLocalStorage` (or polyfill).
+Propagation: `queryFn` opens scope → `s.resolve(UsersClient)` → `UsersClient.createInstance(s)` → `s.resolve(Api)` → `Api.createInstance(s)` → `s.resolve(AppConfig)` (singleton, root cache) + `s.resolve(AuthToken)` (scoped, cached on `s`). Two parallel `useQuery`s = two parallel `di.run`s = two isolated `AuthToken`s. `Api` rebuilt each resolve (transient). All in browser, no `node:async_hooks`.
 
 ## Concepts
 
@@ -315,9 +329,9 @@ class RequestContext {
   id = crypto.randomUUID();
 }
 
-await di.run(async () => {
-  const a = await di.resolve(RequestContext);
-  const b = await di.resolve(RequestContext);
+await di.run(async (s) => {
+  const a = await s.resolve(RequestContext);
+  const b = await s.resolve(RequestContext);
   // a === b — same instance for the whole run
 });
 ```
@@ -357,40 +371,39 @@ class BadCache {
 }
 ```
 
-Inference and validation are first-resolve operations. Once a token is cached, subsequent resolves do not re-evaluate. Base `Snabditel` does not implement inheritance or validation; declared `injectionScope` is taken as-is.
+Inference and validation are first-resolve operations. Once a token is cached, subsequent resolves do not re-evaluate. Both `Snabditel` and `AlsSnabditel` share this engine.
 
-#### Concurrent scopes (`AlsSnabditel`)
+#### Concurrent scopes
 
-Base `Snabditel` has single-flight `run()` — nested or concurrent `run()` throws. For parallel requests use the ALS variant:
+Both flavors handle parallel `run()` calls. Base `Snabditel` requires the explicit `s` resolver passed to `run`'s callback (and to `createInstance`); `AlsSnabditel` propagates it implicitly via `AsyncLocalStorage`.
 
 ```ts
-import { AlsSnabditel } from "snabditel/als";
+import { Snabditel, type ASnabditel } from "snabditel";
 
-const di = new AlsSnabditel();
+const di = new Snabditel();
 
 class RequestHandler {
-  static async createInstance() {
-    return new RequestHandler(await di.resolve(Logger));
+  static async createInstance(s: ASnabditel) {
+    return new RequestHandler(await s.resolve(Logger));
   }
-
   constructor(private logger: Logger) {}
-  async handle(req: Request) { /* resolve scoped deps freely */ }
+  async handle(req: Request) { /* ... */ }
 }
 
 await Promise.all([
-  di.run(async () => {
-    const h = await di.resolve(RequestHandler);
+  di.run(async (s) => {
+    const h = await s.resolve(RequestHandler);
     return h.handle(req1);
   }),
-  di.run(async () => {
-    const h = await di.resolve(RequestHandler);
+  di.run(async (s) => {
+    const h = await s.resolve(RequestHandler);
     return h.handle(req2);
   }),
 ]);
-// each run() gets its own scope; no leak across awaits
+// each run() gets isolated scope; no leak between siblings.
 ```
 
-The `snabditel/als` subpath exists so `node:async_hooks` only loads when imported.
+`AlsSnabditel` (subpath `snabditel/als`) extends this with implicit `s` propagation, so callbacks and `createInstance` may ignore the `s` arg. The subpath is separate so `node:async_hooks` only loads when imported.
 
 ### Seeding
 
@@ -404,9 +417,9 @@ di.seed(Logger, fakeLogger);
 // Per-run scoped data (e.g. current user)
 class CurrentUser { constructor(public id: string) {} }
 
-await di.run(async () => {
-  di.seed(CurrentUser, new CurrentUser("u_123"), { injectionScope: "scoped" });
-  const user = await di.resolve(CurrentUser);
+await di.run(async (s) => {
+  s.seed(CurrentUser, new CurrentUser("u_123"), { injectionScope: "scoped" });
+  const user = await s.resolve(CurrentUser);
 });
 ```
 
@@ -415,13 +428,13 @@ Scoped seeds shadow singleton seeds inside `run()`. A `transient` seed throws.
 ## API
 
 ```ts
-class Snabditel {
+class Snabditel implements ASnabditel {
   resolve<T>(token: Token<T>): Promise<T>;
   seed<T>(token: string | symbol | (new (...a: any[]) => T), value: T, options?: { injectionScope?: InjectionScope }): void;
-  run<T>(cb: () => Promise<T>): Promise<T>;
+  run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T>;
 }
 
-class AlsSnabditel implements ASnabditel {} // ALS-backed run() + scope inheritance + validation
+class AlsSnabditel implements ASnabditel {} // ALS-backed run() — s arg optional in practice; same inheritance + validation
 ```
 
 ## Develop
