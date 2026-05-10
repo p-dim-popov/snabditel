@@ -4,16 +4,10 @@ import type {
   InjectionScope,
   Resolvable,
   SeedOptions,
+  SelfResolvable,
   Token,
 } from "./snabditel.types";
 import { readSeedToken, writeSeed } from "./internal/seed-helpers";
-import {
-  effectiveScopedNoRunError,
-  isWider,
-  mismatchError,
-  narrower,
-  scopeOf,
-} from "./internal/scope-helpers";
 
 type Key = unknown;
 type Scope = Map<Key, unknown>;
@@ -31,11 +25,62 @@ type BuildResult<T> = {
   builtInScope: Scope | null;
 };
 
+const RANK: Record<InjectionScope, number> = {
+  transient: 0,
+  scoped: 1,
+  singleton: 2,
+};
+
 export class AlsSnabditel implements ASnabditel {
   private singletons: Scope = new Map();
   private scopeAls = new AsyncLocalStorage<Scope>();
   private frameAls = new AsyncLocalStorage<Frame>();
   private inFlight = new Map<Key, Promise<BuildResult<unknown>>>();
+
+  private narrower(a: InjectionScope, b: InjectionScope): InjectionScope {
+    return RANK[a] <= RANK[b] ? a : b;
+  }
+
+  private isWider(declared: InjectionScope, min: InjectionScope): boolean {
+    return RANK[declared] > RANK[min];
+  }
+
+  private scopeOf<T>(binding: Resolvable<T>): InjectionScope | undefined {
+    if ("injectionScope" in binding && binding.injectionScope !== undefined) {
+      return binding.injectionScope;
+    }
+    return undefined;
+  }
+
+  private ownerName<T>(binding: Resolvable<T>): string {
+    if (typeof binding === "function") {
+      return binding.name && binding.name.length > 0
+        ? binding.name
+        : "anonymous class";
+    }
+    const ctor = (binding as SelfResolvable<T>).constructor;
+    if (ctor && ctor.name && ctor.name !== "Object") {
+      return ctor.name;
+    }
+    return "anonymous SelfResolvable";
+  }
+
+  private mismatchError<T>(
+    binding: Resolvable<T>,
+    declared: InjectionScope,
+    min: InjectionScope,
+  ): Error {
+    return new Error(
+      `Cannot resolve ${this.ownerName(binding)} as ${declared}: depends on a ${min} service. ` +
+        `Either remove \`injectionScope\` to inherit '${min}', or set it to '${min}' or 'transient'.`,
+    );
+  }
+
+  private effectiveScopedNoRunError<T>(binding: Resolvable<T>): Error {
+    return new Error(
+      `${this.ownerName(binding)} effective scope is 'scoped' (inherited from a scoped dependency) but no run() scope is active.`,
+    );
+  }
 
   async run<T>(callback: () => Promise<T>): Promise<T> {
     return this.scopeAls.run(new Map(), callback);
@@ -52,11 +97,11 @@ export class AlsSnabditel implements ASnabditel {
   private bubble(scope: InjectionScope): void {
     const frame = this.frameAls.getStore();
     if (!frame) return;
-    const next = narrower(frame.minScope, scope);
+    const next = this.narrower(frame.minScope, scope);
     if (next === frame.minScope) return;
     frame.minScope = next;
-    if (frame.declared !== undefined && isWider(frame.declared, frame.minScope)) {
-      throw mismatchError(frame.ownerToken, frame.declared, frame.minScope);
+    if (frame.declared !== undefined && this.isWider(frame.declared, frame.minScope)) {
+      throw this.mismatchError(frame.ownerToken, frame.declared, frame.minScope);
     }
   }
 
@@ -79,7 +124,7 @@ export class AlsSnabditel implements ASnabditel {
     const parent = this.frameAls.getStore() ?? null;
     this.assertNoCycle(token, parent);
 
-    const declared = scopeOf(token);
+    const declared = this.scopeOf(token);
     const frame: Frame = {
       ownerToken: token,
       declared,
@@ -100,8 +145,8 @@ export class AlsSnabditel implements ASnabditel {
     try {
       const value = await this.frameAls.run(frame, () => this.build(token));
 
-      if (declared !== undefined && isWider(declared, frame.minScope)) {
-        throw mismatchError(token, declared, frame.minScope);
+      if (declared !== undefined && this.isWider(declared, frame.minScope)) {
+        throw this.mismatchError(token, declared, frame.minScope);
       }
       const effective: InjectionScope = declared ?? frame.minScope;
       const builtInScope = this.scopeAls.getStore() ?? null;
@@ -134,7 +179,7 @@ export class AlsSnabditel implements ASnabditel {
     if (effective === "scoped") {
       if (builtInScope === null) {
         throw declared === undefined
-          ? effectiveScopedNoRunError(token)
+          ? this.effectiveScopedNoRunError(token)
           : new Error("Scoped resolution requires an active run() scope");
       }
       builtInScope.set(token, value);
