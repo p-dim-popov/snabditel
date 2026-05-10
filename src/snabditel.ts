@@ -60,16 +60,23 @@ export class Snabditel implements ASnabditel {
     value: T,
     options: SeedOptions = {},
   ): void {
+    return this.seedInto(this.outerCtx().scope, token, value, options);
+  }
+
+  private seedInto<T>(
+    scope: Scope | null,
+    token: string | symbol | (new (...args: any[]) => T),
+    value: T,
+    options: SeedOptions,
+  ): void {
     const which = options.injectionScope ?? "singleton";
     if (which === "singleton") {
       this.singletons.set(token, value);
       return;
     }
     if (which === "scoped") {
-      const target = this.outerCtx().scope;
-      if (!target)
-        throw new Error("Scoped seed requires an active run() scope");
-      target.set(token, value);
+      if (!scope) throw new Error("Scoped seed requires an active run() scope");
+      scope.set(token, value);
       return;
     }
     throw new Error("Cannot seed a transient value");
@@ -132,18 +139,7 @@ export class Snabditel implements ASnabditel {
         value: T,
         options: SeedOptions = {},
       ): void => {
-        const which = options.injectionScope ?? "singleton";
-        if (which === "singleton") {
-          this.singletons.set(token, value);
-          return;
-        }
-        if (which === "scoped") {
-          if (!ctx.scope)
-            throw new Error("Scoped seed requires an active run() scope");
-          ctx.scope.set(token, value);
-          return;
-        }
-        throw new Error("Cannot seed a transient value");
+        return this.seedInto(ctx.scope, token, value, options);
       },
 
       run: <T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> => {

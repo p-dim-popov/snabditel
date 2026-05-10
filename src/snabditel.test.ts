@@ -163,7 +163,7 @@ describe("Snabditel", () => {
   });
 
   test("concurrent resolves with overlapping shared dep do not false-positive cycle", async () => {
-    const s = new Snabditel();
+    const di = new Snabditel();
     const Shared: SelfResolvable<{ shared: true }> = {
       createInstance: async () => {
         await new Promise((res) => setTimeout(res, 10));
@@ -171,18 +171,18 @@ describe("Snabditel", () => {
       },
     };
     const A: SelfResolvable<{ a: true }> = {
-      createInstance: async () => {
+      createInstance: async (s) => {
         await s.resolve(Shared);
         return { a: true };
       },
     };
     const B: SelfResolvable<{ b: true }> = {
-      createInstance: async () => {
+      createInstance: async (s) => {
         await s.resolve(Shared);
         return { b: true };
       },
     };
-    await Promise.all([s.resolve(A), s.resolve(B)]);
+    await Promise.all([di.resolve(A), di.resolve(B)]);
   });
 
   test("singleton retries after createInstance failure (cache evicted on reject)", async () => {
