@@ -1,0 +1,1 @@
+export { AlsSnabditel } from "./als";
