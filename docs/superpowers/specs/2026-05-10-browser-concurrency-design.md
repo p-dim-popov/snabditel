@@ -351,7 +351,7 @@ import { createStart, createMiddleware } from "@tanstack/react-start";
 import { di } from "./di";
 
 const diMiddleware = createMiddleware().server(({ next }) =>
-  di.run((_s) => next()),   // ALS propagates ctx; _s unused inside next()
+  di.run(() => next()),   // ALS propagates ctx; no need to receive s
 );
 
 export const startInstance = createStart(() => ({
