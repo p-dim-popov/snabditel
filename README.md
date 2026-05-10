@@ -423,3 +423,14 @@ class Snabditel {
 
 class AlsSnabditel implements ASnabditel {} // ALS-backed run() + scope inheritance + validation
 ```
+
+## Develop
+
+```bash
+bun install
+bun test
+bun run typecheck
+bun run build
+```
+
+Source written for Bun, but the published package targets Node and runs anywhere ESM/CJS does.
