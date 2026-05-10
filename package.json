@@ -1,6 +1,7 @@
 {
   "name": "snabditel",
   "version": "0.0.1",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
