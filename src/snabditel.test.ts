@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Snabditel } from "./snabditel";
-import type { SelfResolvable } from "./snabditel.types";
+import type { ASnabditel, SelfResolvable } from "./snabditel.types";
 
 describe("Snabditel", () => {
   test("resolve(Class) instantiates and caches as singleton by default", async () => {
@@ -220,5 +220,137 @@ describe("Snabditel", () => {
 
     const [r1, r2] = await Promise.all([work(20), work(5)]);
     expect(r1).not.toBe(r2);
+  });
+
+  test("scope inheritance: undeclared inherits narrowest dep scope", async () => {
+    class RequestId {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new RequestId(); }
+      id = Math.random();
+    }
+    class UserService {
+      static async createInstance(s: ASnabditel) {
+        return new UserService(await s.resolve(RequestId));
+      }
+      constructor(public req: RequestId) {}
+    }
+    const di = new Snabditel();
+    const a = await di.run(async (s) => {
+      const u = await s.resolve(UserService);
+      return u.req;
+    });
+    const b = await di.run(async (s) => {
+      const u = await s.resolve(UserService);
+      return u.req;
+    });
+    expect(a).not.toBe(b);
+  });
+
+  test("validation: declared singleton with scoped dep throws", async () => {
+    class RequestId {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new RequestId(); }
+    }
+    class BadCache {
+      static readonly injectionScope = "singleton" as const;
+      static async createInstance(s: ASnabditel) {
+        await s.resolve(RequestId);
+        return new BadCache();
+      }
+    }
+    const di = new Snabditel();
+    await expect(
+      di.run((s) => s.resolve(BadCache)),
+    ).rejects.toThrow(/depends on a scoped service/);
+  });
+
+  test("cycle detection via parent frame chain", async () => {
+    class A {
+      static async createInstance(s: ASnabditel) {
+        await s.resolve(B);
+        return new A();
+      }
+    }
+    class B {
+      static async createInstance(s: ASnabditel) {
+        await s.resolve(A);
+        return new B();
+      }
+    }
+    const di = new Snabditel();
+    await expect(di.resolve(A)).rejects.toThrow(/Cycle detected/);
+  });
+
+  test("cross-run singleton race: same instance, single createInstance call", async () => {
+    let constructed = 0;
+    class Slow {
+      static async createInstance() {
+        constructed++;
+        await new Promise((r) => setTimeout(r, 10));
+        return new Slow();
+      }
+    }
+    const di = new Snabditel();
+    const [a, b] = await Promise.all([
+      di.run((s) => s.resolve(Slow)),
+      di.run((s) => s.resolve(Slow)),
+    ]);
+    expect(a).toBe(b);
+    expect(constructed).toBe(1);
+  });
+
+  test("transient scope rebuilt per resolve, scoped deps shared in same run", async () => {
+    let apiBuilds = 0;
+    class AuthToken {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new AuthToken(); }
+      value = Math.random();
+    }
+    class Api {
+      static readonly injectionScope = "transient" as const;
+      static async createInstance(s: ASnabditel) {
+        apiBuilds++;
+        return new Api(await s.resolve(AuthToken));
+      }
+      constructor(public auth: AuthToken) {}
+    }
+    const di = new Snabditel();
+    await di.run(async (s) => {
+      const a1 = await s.resolve(Api);
+      const a2 = await s.resolve(Api);
+      expect(a1).not.toBe(a2);
+      expect(a1.auth).toBe(a2.auth);
+    });
+    expect(apiBuilds).toBe(2);
+  });
+
+  test("nested run: scope reset, frame inherited (cycle survives)", async () => {
+    class A {
+      static async createInstance(s: ASnabditel) {
+        // Schedule an inner run that re-asks for A — should detect cycle.
+        return s.run(async (s2) => {
+          await s2.resolve(A);
+          return new A();
+        });
+      }
+    }
+    const di = new Snabditel();
+    await expect(di.resolve(A)).rejects.toThrow(/Cycle detected/);
+  });
+
+  test("captured s after run() end keeps using the captured scope map", async () => {
+    class RequestId {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new RequestId(); }
+      id = Math.random();
+    }
+    const di = new Snabditel();
+    let captured!: ASnabditel;
+    const inside = await di.run(async (s) => {
+      captured = s;
+      return s.resolve(RequestId);
+    });
+    const after = await captured.resolve(RequestId);
+    expect(after).toBe(inside);
   });
 });
