@@ -25,13 +25,13 @@ describe("Snabditel", () => {
     const req2 = { id: 2 };
     let inside1: typeof req1 | null = null;
     let inside2: typeof req2 | null = null;
-    await s.run(async () => {
-      s.seed("REQ", req1, { injectionScope: "scoped" });
-      inside1 = await s.resolve<typeof req1>("REQ");
+    await s.run(async (sc) => {
+      sc.seed("REQ", req1, { injectionScope: "scoped" });
+      inside1 = await sc.resolve<typeof req1>("REQ");
     });
-    await s.run(async () => {
-      s.seed("REQ", req2, { injectionScope: "scoped" });
-      inside2 = await s.resolve<typeof req2>("REQ");
+    await s.run(async (sc) => {
+      sc.seed("REQ", req2, { injectionScope: "scoped" });
+      inside2 = await sc.resolve<typeof req2>("REQ");
     });
     expect(inside1!.id).toBe(1);
     expect(inside2!.id).toBe(2);
@@ -57,9 +57,9 @@ describe("Snabditel", () => {
     s.seed("LOG", "global");
     let inside: string | null = null;
     let outside: string;
-    await s.run(async () => {
-      s.seed("LOG", "request", { injectionScope: "scoped" });
-      inside = await s.resolve<string>("LOG");
+    await s.run(async (sc) => {
+      sc.seed("LOG", "request", { injectionScope: "scoped" });
+      inside = await sc.resolve<string>("LOG");
     });
     outside = await s.resolve<string>("LOG");
     expect(inside!).toBe("request");
@@ -115,13 +115,13 @@ describe("Snabditel", () => {
     const s = new Snabditel();
     let inner1a: object | null = null;
     let inner1b: object | null = null;
-    await s.run(async () => {
-      inner1a = await s.resolve(r);
-      inner1b = await s.resolve(r);
+    await s.run(async (sc) => {
+      inner1a = await sc.resolve(r);
+      inner1b = await sc.resolve(r);
     });
     let inner2: object | null = null;
-    await s.run(async () => {
-      inner2 = await s.resolve(r);
+    await s.run(async (sc) => {
+      inner2 = await sc.resolve(r);
     });
     expect(inner1a!).toBe(inner1b!);
     expect(inner1a!).not.toBe(inner2!);
@@ -134,24 +134,6 @@ describe("Snabditel", () => {
     };
     const s = new Snabditel();
     await expect(s.resolve(r)).rejects.toThrow(/run\(\) scope/);
-  });
-
-  test("nested run() throws (single-flight)", async () => {
-    const s = new Snabditel();
-    await expect(
-      s.run(async () => {
-        await s.run(async () => {});
-      }),
-    ).rejects.toThrow(/already active/);
-  });
-
-  test("concurrent run() throws (single-flight)", async () => {
-    const s = new Snabditel();
-    const slow = s.run(async () => {
-      await new Promise((r) => setTimeout(r, 20));
-    });
-    await expect(s.run(async () => {})).rejects.toThrow(/already active/);
-    await slow;
   });
 
   test("sequential run() works after prior completes", async () => {
@@ -228,10 +210,10 @@ describe("Snabditel", () => {
     const di = new Snabditel();
 
     const work = (delay: number) =>
-      di.run(async () => {
-        const a = await di.resolve(RequestId);
+      di.run(async (s) => {
+        const a = await s.resolve(RequestId);
         await new Promise((r) => setTimeout(r, delay));
-        const b = await di.resolve(RequestId);
+        const b = await s.resolve(RequestId);
         expect(a).toBe(b);
         return a;
       });

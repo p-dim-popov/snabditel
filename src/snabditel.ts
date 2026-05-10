@@ -1,63 +1,120 @@
 import type {
   ASnabditel,
+  InjectionScope,
   Resolvable,
   SeedOptions,
+  SelfResolvable,
   Token,
 } from "./snabditel.types";
 
 type Key = unknown;
 type Scope = Map<Key, unknown>;
 
+export type Frame = {
+  ownerToken: Resolvable<unknown>;
+  declared: InjectionScope | undefined;
+  minScope: InjectionScope;
+  parent: Frame | null;
+};
+
+export type Ctx = {
+  scope: Scope | null;
+  frame: Frame | null;
+};
+
+type BuildResult<T> = {
+  value: T;
+  effectiveScope: InjectionScope;
+  builtInScope: Scope | null;
+};
+
+const RANK: Record<InjectionScope, number> = {
+  transient: 0,
+  scoped: 1,
+  singleton: 2,
+};
+
+export const EMPTY_CTX: Ctx = Object.freeze({
+  scope: null,
+  frame: null,
+}) as Ctx;
+
 export class Snabditel implements ASnabditel {
   private singletons: Scope = new Map();
-  private localScope: Scope | null = null;
+  private inflight = new Map<Key, Promise<BuildResult<unknown>>>();
+
+  protected outerCtx(): Ctx {
+    return EMPTY_CTX;
+  }
+
+  protected wrapAsync<T>(_ctx: Ctx, fn: () => Promise<T>): Promise<T> {
+    return fn();
+  }
+
+  resolve<T>(token: Token<T>): Promise<T> {
+    return this.resolveIn(token, this.outerCtx());
+  }
 
   seed<T>(
     token: string | symbol | (new (...args: any[]) => T),
     value: T,
     options: SeedOptions = {},
   ): void {
-    const injectionScope = options.injectionScope ?? "singleton";
-    if (injectionScope === "singleton") {
-      this.singletons.set(token as Key, value);
+    const which = options.injectionScope ?? "singleton";
+    if (which === "singleton") {
+      this.singletons.set(token, value);
       return;
     }
-    if (injectionScope === "scoped") {
-      if (!this.localScope) {
+    if (which === "scoped") {
+      const target = this.outerCtx().scope;
+      if (!target)
         throw new Error("Scoped seed requires an active run() scope");
-      }
-      this.localScope.set(token as Key, value);
+      target.set(token, value);
       return;
     }
     throw new Error("Cannot seed a transient value");
   }
 
-  async run<T>(callback: (s: ASnabditel) => Promise<T>): Promise<T> {
-    if (this.localScope) {
-      throw new Error(
-        "run() already active — concurrent scopes require AlsSnabditel",
-      );
-    }
-    this.localScope = new Map();
-    try {
-      return await callback(this);
-    } finally {
-      this.localScope = null;
-    }
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    const outer = this.outerCtx();
+    const ctx: Ctx = { scope: new Map(), frame: outer.frame };
+    return this.wrapAsync(ctx, () => cb(this.makeScoped(ctx)));
   }
 
-  async resolve<T>(token: Token<T>): Promise<T> {
+  protected resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> {
     if (typeof token === "string" || typeof token === "symbol") {
-      return this.resolveSeeded<T>(token);
+      return this.readSeedAndBubble<T>(token, ctx);
     }
-    return this.resolveBinding<T>(token);
+
+    if (this.singletons.has(token)) {
+      this.bubble("singleton", ctx.frame);
+      return Promise.resolve(this.singletons.get(token) as T | Promise<T>);
+    }
+
+    if (ctx.scope?.has(token)) {
+      this.bubble("scoped", ctx.frame);
+      return Promise.resolve(ctx.scope.get(token) as T | Promise<T>);
+    }
+
+    const pending = this.inflight.get(token);
+    if (pending) {
+      this.assertNoCycle(token, ctx.frame);
+      return this.waiter(token, pending as Promise<BuildResult<T>>, ctx);
+    }
+
+    return this.builder(token, ctx);
   }
 
-  private async resolveSeeded<T>(token: string | symbol): Promise<T> {
-    if (this.localScope?.has(token)) {
-      return (await this.localScope.get(token)) as T;
+  private async readSeedAndBubble<T>(
+    token: string | symbol,
+    ctx: Ctx,
+  ): Promise<T> {
+    if (ctx.scope?.has(token)) {
+      this.bubble("scoped", ctx.frame);
+      return (await ctx.scope.get(token)) as T;
     }
     if (this.singletons.has(token)) {
+      this.bubble("singleton", ctx.frame);
       return (await this.singletons.get(token)) as T;
     }
     throw new Error(
@@ -65,38 +122,201 @@ export class Snabditel implements ASnabditel {
     );
   }
 
-  private async resolveBinding<T>(token: Resolvable<T>): Promise<T> {
-    const injectionScope =
-      ("injectionScope" in token ? token.injectionScope : undefined) ?? "singleton";
+  private makeScoped(ctx: Ctx): ASnabditel {
+    return {
+      resolve: <T>(token: Token<T>): Promise<T> =>
+        this.resolveIn(token, ctx),
 
-    if (injectionScope === "singleton") {
-      return this.cacheBuild(this.singletons, token);
-    }
-    if (injectionScope === "scoped") {
-      if (!this.localScope) {
-        throw new Error("Scoped resolution requires an active run() scope");
-      }
-      return this.cacheBuild(this.localScope, token);
-    }
-    return this.build(token);
+      seed: <T>(
+        token: string | symbol | (new (...args: any[]) => T),
+        value: T,
+        options: SeedOptions = {},
+      ): void => {
+        const which = options.injectionScope ?? "singleton";
+        if (which === "singleton") {
+          this.singletons.set(token, value);
+          return;
+        }
+        if (which === "scoped") {
+          if (!ctx.scope)
+            throw new Error("Scoped seed requires an active run() scope");
+          ctx.scope.set(token, value);
+          return;
+        }
+        throw new Error("Cannot seed a transient value");
+      },
+
+      run: <T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> => {
+        const child: Ctx = { scope: new Map(), frame: ctx.frame };
+        return this.wrapAsync(child, () => cb(this.makeScoped(child)));
+      },
+    };
   }
 
-  private cacheBuild<T>(cache: Scope, token: Resolvable<T>): Promise<T> {
-    if (cache.has(token)) {
-      return Promise.resolve(cache.get(token) as T | Promise<T>);
-    }
-    const p = this.build(token);
-    cache.set(token, p);
-    p.catch(() => {
-      if (cache.get(token) === p) cache.delete(token);
+  private async builder<T>(token: Resolvable<T>, ctx: Ctx): Promise<T> {
+    this.assertNoCycle(token, ctx.frame);
+
+    const declared = this.scopeOf(token);
+    const frame: Frame = {
+      ownerToken: token,
+      declared,
+      minScope: "singleton",
+      parent: ctx.frame,
+    };
+
+    let resolveSettled!: (r: BuildResult<T>) => void;
+    let rejectSettled!: (e: unknown) => void;
+    const pending = new Promise<BuildResult<T>>((resolve, reject) => {
+      resolveSettled = resolve;
+      rejectSettled = reject;
     });
-    return p;
+    pending.catch(() => undefined);
+    this.inflight.set(token, pending as Promise<BuildResult<unknown>>);
+
+    try {
+      const childCtx: Ctx = { scope: ctx.scope, frame };
+      const childS = this.makeScoped(childCtx);
+      const value = await this.wrapAsync(childCtx, () =>
+        this.build(token, childS),
+      );
+
+      if (declared !== undefined && this.isWider(declared, frame.minScope)) {
+        throw this.mismatchError(token, declared, frame.minScope);
+      }
+      const effective: InjectionScope = declared ?? frame.minScope;
+      const builtInScope = ctx.scope;
+
+      this.placeIntoCache(token, value, effective, builtInScope, declared);
+      this.bubble(effective, ctx.frame);
+
+      const result: BuildResult<T> = {
+        value,
+        effectiveScope: effective,
+        builtInScope,
+      };
+      resolveSettled(result);
+      return value;
+    } catch (e) {
+      rejectSettled(e);
+      throw e;
+    } finally {
+      this.inflight.delete(token);
+    }
   }
 
-  private async build<T>(binding: Resolvable<T>): Promise<T> {
-    if ("createInstance" in binding) {
-      return await binding.createInstance(this);
+  private async waiter<T>(
+    token: Resolvable<T>,
+    pending: Promise<BuildResult<T>>,
+    ctx: Ctx,
+  ): Promise<T> {
+    const result = await pending;
+    this.bubble(result.effectiveScope, ctx.frame);
+
+    if (result.effectiveScope === "singleton") return result.value;
+    if (result.effectiveScope === "scoped") {
+      if (ctx.scope === result.builtInScope) return result.value;
+      return this.resolveIn(token, ctx);
     }
-    return new binding();
+    return this.resolveIn(token, ctx);
+  }
+
+  private async build<T>(
+    token: Resolvable<T>,
+    s: ASnabditel,
+  ): Promise<T> {
+    if ("createInstance" in token) {
+      return await token.createInstance(s);
+    }
+    return new (token as new () => T)();
+  }
+
+  private placeIntoCache<T>(
+    token: Resolvable<T>,
+    value: T,
+    effective: InjectionScope,
+    builtInScope: Scope | null,
+    declared: InjectionScope | undefined,
+  ): void {
+    if (effective === "singleton") {
+      this.singletons.set(token, value);
+      return;
+    }
+    if (effective === "scoped") {
+      if (builtInScope === null) {
+        throw declared === undefined
+          ? this.effectiveScopedNoRunError(token)
+          : new Error("Scoped resolution requires an active run() scope");
+      }
+      builtInScope.set(token, value);
+      return;
+    }
+    // transient: no cache
+  }
+
+  private narrower(a: InjectionScope, b: InjectionScope): InjectionScope {
+    return RANK[a] <= RANK[b] ? a : b;
+  }
+
+  private isWider(declared: InjectionScope, min: InjectionScope): boolean {
+    return RANK[declared] > RANK[min];
+  }
+
+  private scopeOf<T>(binding: Resolvable<T>): InjectionScope | undefined {
+    if ("injectionScope" in binding && binding.injectionScope !== undefined) {
+      return binding.injectionScope;
+    }
+    return undefined;
+  }
+
+  private ownerName<T>(binding: Resolvable<T>): string {
+    if (typeof binding === "function") {
+      return binding.name && binding.name.length > 0
+        ? binding.name
+        : "anonymous class";
+    }
+    const ctor = (binding as SelfResolvable<T>).constructor;
+    if (ctor && ctor.name && ctor.name !== "Object") return ctor.name;
+    return "anonymous SelfResolvable";
+  }
+
+  private bubble(scope: InjectionScope, frame: Frame | null): void {
+    if (!frame) return;
+    const next = this.narrower(frame.minScope, scope);
+    if (next === frame.minScope) return;
+    frame.minScope = next;
+    if (
+      frame.declared !== undefined &&
+      this.isWider(frame.declared, frame.minScope)
+    ) {
+      throw this.mismatchError(frame.ownerToken, frame.declared, frame.minScope);
+    }
+  }
+
+  private assertNoCycle(
+    token: Resolvable<unknown>,
+    startFrame: Frame | null,
+  ): void {
+    for (let f: Frame | null = startFrame; f !== null; f = f.parent) {
+      if (f.ownerToken === token) {
+        throw new Error("Cycle detected during resolution");
+      }
+    }
+  }
+
+  private mismatchError<T>(
+    binding: Resolvable<T>,
+    declared: InjectionScope,
+    min: InjectionScope,
+  ): Error {
+    return new Error(
+      `Cannot resolve ${this.ownerName(binding)} as ${declared}: depends on a ${min} service. ` +
+        `Either remove \`injectionScope\` to inherit '${min}', or set it to '${min}' or 'transient'.`,
+    );
+  }
+
+  private effectiveScopedNoRunError<T>(binding: Resolvable<T>): Error {
+    return new Error(
+      `${this.ownerName(binding)} effective scope is 'scoped' (inherited from a scoped dependency) but no run() scope is active.`,
+    );
   }
 }
