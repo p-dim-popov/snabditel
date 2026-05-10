@@ -1,7 +1,30 @@
 {
   "name": "snabditel",
   "version": "0.0.1",
+  "description": "Tiny async DI for TypeScript. Zero deps. ESM + CJS, scoped/singleton/transient, cycle detection, optional ALS propagation.",
   "license": "MIT",
+  "author": "Peter Popov <p.dim.popov@gmail.com>",
+  "homepage": "https://github.com/p-dim-popov/snabditel#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/p-dim-popov/snabditel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/p-dim-popov/snabditel/issues"
+  },
+  "keywords": [
+    "di",
+    "dependency-injection",
+    "ioc",
+    "container",
+    "async",
+    "typescript",
+    "scoped",
+    "singleton",
+    "als",
+    "async-hooks",
+    "zero-dependencies"
+  ],
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -20,8 +43,9 @@
   },
   "files": [
     "dist",
-    "src",
-    "README.md"
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "!src/**/*.test-d.ts"
   ],
   "scripts": {
     "build": "bun run typecheck &&bun run clean && bun run build:esm && bun run build:cjs && bun run build:types",
