@@ -192,3 +192,222 @@ export function Users() {
 ```
 
 For per-query scoping in the browser, swap to `AlsSnabditel` and use a runtime that supports `AsyncLocalStorage` (or polyfill).
+
+## Concepts
+
+### Tokens
+
+Anything resolvable:
+
+- **Plain class** — `new ()` constructor with no deps. Default scope: singleton.
+- **Class with static `createInstance` (and optional `injectionScope`)** — class itself acts as a `SelfResolvable`. Use when class has deps or async setup.
+- **String / symbol** — must be `seed()`-ed first. Use sparingly (config, request context).
+
+#### Class with async init
+
+```ts
+class Database {
+  static async createInstance() {
+    const config = await di.resolve(AppConfig);
+    const connectionString = config.get("db.connectionString");
+    const connection = await connect(connectionString);
+    return new Database(connection);
+  }
+
+  constructor(public conn: unknown) {}
+}
+
+const db = await di.resolve(Database);
+```
+
+#### Swapping an implementation
+
+```ts
+class Mailer {
+  static async createInstance() {
+    const config = await di.resolve(AppConfig);
+    const mailerConfig = config.get('mailer');
+    const provider = await (async () => {
+      switch (mailerConfig.provider) {
+        case "smtp": return di.resolve(SmtpMailerProvider);
+        case "fake": return di.resolve(FakeMailerProvider);
+        default: throw new Error("Unknown mailer provider");
+      }
+    })()
+    return new Mailer(provider);
+  }
+
+  constructor(private readonly provider: MailerProvider) {}
+
+  send(to: string): {
+    // ...
+  }
+}
+
+interface MailerProvider {
+  send(to: string): Promise<void>;
+}
+
+class SmtpMailerProvider implements MailerProvider { async send(to: string) { /* ... */ } }
+class FakeMailerProvider implements MailerProvider { async send(_: string) {} }
+
+const mailer = await di.resolve(Mailer); // SmtpMailer or FakeMailer based on config
+```
+
+#### Using a factory
+
+```ts
+class MailerProviderFactory {
+  static async createInstance() {
+    const config = await di.resolve(AppConfig);
+    return new MailerProviderFactory(config);
+  }
+
+  constructor(private readonly config: AppConfig) {}
+
+  create() {
+    const mailerConfig = this.config.get('mailer');
+    switch (mailerConfig.provider) {
+      case "smtp": return di.resolve(SmtpMailerProvider);
+      case "fake": return di.resolve(FakeMailerProvider);
+      default: throw new Error("Unknown mailer provider");
+    }
+  }
+}
+
+class Mailer {
+  static async createInstance() {
+    const mailerProviderFactory = await di.resolve(MailerProviderFactory);
+    const provider = await mailerProviderFactory.create();
+    return new Mailer(provider);
+  }
+
+  constructor(private readonly provider: MailerProvider) {}
+
+  send(to: string): {
+    // ...
+  }
+}
+```
+
+#### Non-class values
+
+Strings/symbols work for plain config or request data — DI still tracks lifetime:
+
+```ts
+di.seed("CFG", { apiUrl: "https://api.example.com" });
+const cfg = await di.resolve<{ apiUrl: string }>("CFG");
+```
+
+### Scopes
+
+| Scope | Behavior |
+|-------|----------|
+| `singleton` | Cached forever in container. Default. |
+| `transient` | New instance every `resolve()`. Cannot be `seed()`-ed. |
+| `scoped` | Cached per `run()`. Requires active scope. |
+
+```ts
+class RequestContext {
+  static readonly injectionScope = "scoped";
+  static createInstance() { return new RequestContext(); }
+
+  id = crypto.randomUUID();
+}
+
+await di.run(async () => {
+  const a = await di.resolve(RequestContext);
+  const b = await di.resolve(RequestContext);
+  // a === b — same instance for the whole run
+});
+```
+
+#### Scope inheritance and validation (`AlsSnabditel`)
+
+In `AlsSnabditel`, a token's effective scope is the narrowest scope of its dependencies when `injectionScope` is omitted, and an explicit `injectionScope` that is wider than its narrowest dependency throws at resolve time.
+
+Lifetime ordering, narrowest to widest: `transient` → `scoped` → `singleton`.
+
+```ts
+import { AlsSnabditel } from "snabditel/als";
+
+const di = new AlsSnabditel();
+
+class RequestId {
+  static readonly injectionScope = "scoped" as const;
+  static createInstance() { return new RequestId(); }
+  id = crypto.randomUUID();
+}
+
+class UserService {
+  // No injectionScope. Effective scope = scoped (inherited from RequestId).
+  static async createInstance() {
+    const req = await di.resolve(RequestId);
+    return new UserService(req);
+  }
+  constructor(private req: RequestId) {}
+}
+
+class BadCache {
+  static readonly injectionScope = "singleton" as const;
+  static async createInstance() {
+    await di.resolve(RequestId);    // throws: declared singleton, dep is scoped
+    return new BadCache();
+  }
+}
+```
+
+Inference and validation are first-resolve operations. Once a token is cached, subsequent resolves do not re-evaluate. Base `Snabditel` does not implement inheritance or validation; declared `injectionScope` is taken as-is.
+
+#### Concurrent scopes (`AlsSnabditel`)
+
+Base `Snabditel` has single-flight `run()` — nested or concurrent `run()` throws. For parallel requests use the ALS variant:
+
+```ts
+import { AlsSnabditel } from "snabditel/als";
+
+const di = new AlsSnabditel();
+
+class RequestHandler {
+  static async createInstance() {
+    return new RequestHandler(await di.resolve(Logger));
+  }
+
+  constructor(private logger: Logger) {}
+  async handle(req: Request) { /* resolve scoped deps freely */ }
+}
+
+await Promise.all([
+  di.run(async () => {
+    const h = await di.resolve(RequestHandler);
+    return h.handle(req1);
+  }),
+  di.run(async () => {
+    const h = await di.resolve(RequestHandler);
+    return h.handle(req2);
+  }),
+]);
+// each run() gets its own scope; no leak across awaits
+```
+
+The `snabditel/als` subpath exists so `node:async_hooks` only loads when imported.
+
+### Seeding
+
+Pre-populate values by class, string, or symbol token. Useful for test doubles and per-request data.
+
+```ts
+// Override a class with a fake — great for tests
+const fakeLogger: Logger = { info: () => {} } as Logger;
+di.seed(Logger, fakeLogger);
+
+// Per-run scoped data (e.g. current user)
+class CurrentUser { constructor(public id: string) {} }
+
+await di.run(async () => {
+  di.seed(CurrentUser, new CurrentUser("u_123"), { injectionScope: "scoped" });
+  const user = await di.resolve(CurrentUser);
+});
+```
+
+Scoped seeds shadow singleton seeds inside `run()`. A `transient` seed throws.
