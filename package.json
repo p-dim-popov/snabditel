@@ -1,6 +1,6 @@
 {
   "name": "snabditel",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Tiny async DI container, NestJS-inspired — no ceremonies. Zero deps. ESM + CJS, scoped/singleton/transient, cycle detection, optional ALS propagation.",
   "license": "MIT",
   "author": "Peter Popov <p.dim.popov@gmail.com>",
