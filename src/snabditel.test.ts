@@ -569,3 +569,67 @@ describe("Snabditel scoped disposal", () => {
     expect(disposed).toBe(false);
   });
 });
+
+describe("Snabditel container.dispose()", () => {
+  test("disposes singletons LIFO and clears the cache", async () => {
+    const calls: string[] = [];
+    class A {
+      static createInstance() { return new A(); }
+      async [Symbol.asyncDispose]() { calls.push("A"); }
+    }
+    class B {
+      static createInstance() { return new B(); }
+      async [Symbol.asyncDispose]() { calls.push("B"); }
+    }
+    const s = new Snabditel();
+    const a1 = await s.resolve(A);
+    await s.resolve(B);
+    await s.dispose();
+    expect(calls).toEqual(["B", "A"]);
+    const a2 = await s.resolve(A);
+    expect(a2).not.toBe(a1);
+  });
+
+  test("dispose() throws AggregateError when disposers throw", async () => {
+    const err = new Error("nope");
+    class Bad {
+      static createInstance() { return new Bad(); }
+      async [Symbol.asyncDispose]() { throw err; }
+    }
+    const s = new Snabditel();
+    await s.resolve(Bad);
+    let caught: unknown;
+    try {
+      await s.dispose();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors).toEqual([err]);
+  });
+
+  test("dispose() is idempotent", async () => {
+    let calls = 0;
+    class A {
+      static createInstance() { return new A(); }
+      async [Symbol.asyncDispose]() { calls++; }
+    }
+    const s = new Snabditel();
+    await s.resolve(A);
+    await s.dispose();
+    await s.dispose();
+    expect(calls).toBe(1);
+  });
+
+  test("seeded singleton value is not disposed by container.dispose()", async () => {
+    let disposed = false;
+    const obj = {
+      [Symbol.asyncDispose]: async () => { disposed = true; },
+    };
+    const s = new Snabditel();
+    s.seed("OWNED", obj);
+    await s.resolve("OWNED");
+    await s.dispose();
+    expect(disposed).toBe(false);
+  });
+});

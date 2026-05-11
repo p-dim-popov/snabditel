@@ -70,6 +70,16 @@ export class Snabditel implements ASnabditel {
     );
   }
 
+  async dispose(): Promise<void> {
+    const items = this.singletonDisposables;
+    this.singletonDisposables = [];
+    const errs = await this.disposeAll(items);
+    this.singletons.clear();
+    if (errs.length > 0) {
+      throw new AggregateError(errs, "singleton disposal failed");
+    }
+  }
+
   private async runWithDisposal<T>(
     record: ScopeRecord,
     body: () => Promise<T>,
