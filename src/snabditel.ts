@@ -46,6 +46,7 @@ export const EMPTY_CTX: Ctx = Object.freeze({
 
 export class Snabditel implements ASnabditel {
   private singletons: Scope = new Map();
+  private singletonDisposables: Array<unknown> = [];
   private inflight = new Map<Key, Promise<BuildResult<unknown>>>();
 
   protected outerCtx(): Ctx {
@@ -64,7 +65,38 @@ export class Snabditel implements ASnabditel {
     const outer = this.outerCtx();
     const record: ScopeRecord = { cache: new Map(), disposables: [] };
     const ctx: Ctx = { scope: record, frame: outer.frame };
-    return this.wrapAsync(ctx, () => cb(this.makeScoped(ctx)));
+    return this.runWithDisposal(record, () =>
+      this.wrapAsync(ctx, () => cb(this.makeScoped(ctx))),
+    );
+  }
+
+  private async runWithDisposal<T>(
+    record: ScopeRecord,
+    body: () => Promise<T>,
+  ): Promise<T> {
+    let bodyErr: unknown;
+    let bodyOk = false;
+    let result: T | undefined;
+    try {
+      result = await body();
+      bodyOk = true;
+    } catch (e) {
+      bodyErr = e;
+    }
+    const disposeErrs = await this.disposeAll(record.disposables);
+    if (!bodyOk) {
+      if (disposeErrs.length > 0) {
+        throw new AggregateError(
+          [bodyErr, ...disposeErrs],
+          "run() body + disposal failed",
+        );
+      }
+      throw bodyErr;
+    }
+    if (disposeErrs.length > 0) {
+      throw new AggregateError(disposeErrs, "disposal failed");
+    }
+    return result as T;
   }
 
   seed<T>(
@@ -151,7 +183,9 @@ export class Snabditel implements ASnabditel {
       run: <T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> => {
         const record: ScopeRecord = { cache: new Map(), disposables: [] };
         const child: Ctx = { scope: record, frame: ctx.frame };
-        return this.wrapAsync(child, () => cb(this.makeScoped(child)));
+        return this.runWithDisposal(record, () =>
+          this.wrapAsync(child, () => cb(this.makeScoped(child))),
+        );
       },
     };
   }
@@ -242,6 +276,7 @@ export class Snabditel implements ASnabditel {
   ): void {
     if (effective === "singleton") {
       this.singletons.set(token, value);
+      if (this.isDisposable(value)) this.singletonDisposables.push(value);
       return;
     }
     if (effective === "scoped") {
@@ -251,9 +286,17 @@ export class Snabditel implements ASnabditel {
           : new Error("Scoped resolution requires an active run() scope");
       }
       builtInScope.cache.set(token, value);
+      if (this.isDisposable(value)) builtInScope.disposables.push(value);
       return;
     }
     // transient: no cache
+  }
+
+  private isDisposable(v: unknown): boolean {
+    if (v === null || (typeof v !== "object" && typeof v !== "function")) return false;
+    const o = v as Record<PropertyKey, unknown>;
+    return typeof o[Symbol.asyncDispose] === "function"
+      || typeof o[Symbol.dispose] === "function";
   }
 
   private narrower(a: InjectionScope, b: InjectionScope): InjectionScope {

@@ -420,3 +420,152 @@ describe("Snabditel disposal helpers", () => {
     expect(errs).toEqual([errC, errA]);
   });
 });
+
+describe("Snabditel scoped disposal", () => {
+  test("scoped instance with asyncDispose is disposed at run() end", async () => {
+    let disposed = false;
+    class Db {
+      static readonly injectionScope = "scoped" as const;
+      static async createInstance() { return new Db(); }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => { await sc.resolve(Db); });
+    expect(disposed).toBe(true);
+  });
+
+  test("scoped instance with sync Symbol.dispose is disposed at run() end", async () => {
+    let disposed = false;
+    class Cache {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Cache(); }
+      [Symbol.dispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => { await sc.resolve(Cache); });
+    expect(disposed).toBe(true);
+  });
+
+  test("scoped instances are disposed LIFO", async () => {
+    const calls: string[] = [];
+    class A {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new A(); }
+      async [Symbol.asyncDispose]() { calls.push("A"); }
+    }
+    class B {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new B(); }
+      async [Symbol.asyncDispose]() { calls.push("B"); }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      await sc.resolve(A);
+      await sc.resolve(B);
+    });
+    expect(calls).toEqual(["B", "A"]);
+  });
+
+  test("scoped instance is disposed even when run() body throws", async () => {
+    let disposed = false;
+    class Db {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Db(); }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    const err = new Error("boom");
+    await expect(
+      s.run(async (sc) => { await sc.resolve(Db); throw err; })
+    ).rejects.toBe(err);
+    expect(disposed).toBe(true);
+  });
+
+  test("dispose errors after successful body throw AggregateError", async () => {
+    const dErr = new Error("d");
+    class Bad {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Bad(); }
+      async [Symbol.asyncDispose]() { throw dErr; }
+    }
+    const s = new Snabditel();
+    let caught: unknown;
+    try {
+      await s.run(async (sc) => { await sc.resolve(Bad); });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors).toEqual([dErr]);
+  });
+
+  test("body error + dispose error → AggregateError with body first", async () => {
+    const bodyErr = new Error("body");
+    const dErr = new Error("dispose");
+    class Bad {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Bad(); }
+      async [Symbol.asyncDispose]() { throw dErr; }
+    }
+    const s = new Snabditel();
+    let caught: unknown;
+    try {
+      await s.run(async (sc) => { await sc.resolve(Bad); throw bodyErr; });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors[0]).toBe(bodyErr);
+    expect((caught as AggregateError).errors[1]).toBe(dErr);
+  });
+
+  test("nested run() — inner disposes on inner exit", async () => {
+    const calls: string[] = [];
+    class Inner {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Inner(); }
+      async [Symbol.asyncDispose]() { calls.push("inner"); }
+    }
+    class Outer {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Outer(); }
+      async [Symbol.asyncDispose]() { calls.push("outer"); }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      await sc.resolve(Outer);
+      await sc.run(async (inner) => { await inner.resolve(Inner); });
+      expect(calls).toEqual(["inner"]); // outer still alive
+    });
+    expect(calls).toEqual(["inner", "outer"]);
+  });
+
+  test("transient instances are never auto-disposed by container", async () => {
+    let disposed = false;
+    const tok: SelfResolvable<{ tag: string }> = {
+      injectionScope: "transient",
+      createInstance: () => ({
+        tag: "x",
+        [Symbol.asyncDispose]: async () => { disposed = true; },
+      }) as { tag: string },
+    };
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      await sc.resolve(tok);
+    });
+    expect(disposed).toBe(false);
+  });
+
+  test("seeded scoped value is not disposed", async () => {
+    let disposed = false;
+    const obj = {
+      [Symbol.asyncDispose]: async () => { disposed = true; },
+    };
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      sc.seed("OWNED", obj, { injectionScope: "scoped" });
+      await sc.resolve("OWNED");
+    });
+    expect(disposed).toBe(false);
+  });
+});
