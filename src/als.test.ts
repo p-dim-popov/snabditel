@@ -78,3 +78,29 @@ describe("AlsSnabditel — implicit propagation", () => {
     await (expect(di.resolve(A)).rejects.toThrow(/Cycle detected/) as unknown as Promise<void>);
   });
 });
+
+describe("AlsSnabditel — disposal", () => {
+  test("disposes scoped instances at run() end", async () => {
+    let disposed = false;
+    class Db {
+      static readonly injectionScope = "scoped" as const;
+      static async createInstance() { return new Db(); }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new AlsSnabditel();
+    await s.run(async () => { await s.resolve(Db); });
+    expect(disposed).toBe(true);
+  });
+
+  test("container.dispose() disposes singletons", async () => {
+    let disposed = false;
+    class App {
+      static createInstance() { return new App(); }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new AlsSnabditel();
+    await s.resolve(App);
+    await s.dispose();
+    expect(disposed).toBe(true);
+  });
+});
