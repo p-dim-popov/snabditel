@@ -1,13 +1,15 @@
 # snabditel
 
+**snabditel** · /snahb-dee-TEL/
+
 [![npm version](https://img.shields.io/npm/v/snabditel.svg)](https://www.npmjs.com/package/snabditel)
 [![bundle size](https://img.shields.io/bundlephobia/minzip/snabditel)](https://bundlephobia.com/package/snabditel)
 [![zero deps](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/p-dim-popov/snabditel)
 [![types](https://img.shields.io/npm/types/snabditel)](https://www.npmjs.com/package/snabditel)
 
-Tiny async DI container, NestJS-inspired — no ceremonies. Zero deps.
+Tiny async DI container — no ceremonies. Zero deps.
 
-No decorators, no module declarations, no providers list, no `@Inject()` tokens — just classes with a static `createInstance` factory and `resolve()`.
+Snabditel is a tiny async DI container. Classes own their factory (`static createInstance`); the container owns lifecycle — scope, caching, disposal. No decorators, no `reflect-metadata`, no registration step. Tokens are optional and used only when you need to inject a value rather than a class.
 
 > Снабдител — Bulgarian for "supplier". Supplies your services with their dependencies, and you with your services.
 
@@ -20,6 +22,12 @@ No decorators, no module declarations, no providers list, no `@Inject()` tokens 
 - **Scope inference + validation.** Effective scope = narrowest dep. Mismatches throw at first resolve.
 - **Cycle detection.** Caught at resolve time.
 - **TS types built-in. ESM + CJS.**
+
+## Tradeoffs
+
+- **Coupling.** `createInstance(s: ASnabditel)` means your class imports a type from the container. The cost of skipping a registration step. Standalone classes prefer awilix.
+- **Async-first.** Every `resolve()` returns a Promise. Right for I/O wiring; not usable from sync constructors or sync React render paths.
+- **Tokens are optional, not absent.** String/symbol tokens still work via `seed()` for values. The "no tokens" claim refers to classes — those resolve as themselves.
 
 ## Install
 
@@ -80,7 +88,7 @@ await di.run(async (s) => {
 
 ### Express
 
-Wrap each request in a fresh DI scope using `AlsSnabditel`.
+`expressScope(di)` opens a fresh DI scope per request, propagates it via `AsyncLocalStorage`, and disposes scoped instances when the response closes.
 
 ```ts
 // ~/modules/di/server.ts
@@ -90,31 +98,32 @@ export const di = new AlsSnabditel();
 ```
 
 ```ts
-// ~/modules/users/user.service.ts
-export class UserService {
-  static createInstance() { return new UserService(); }
-  list() { return [{ id: 1, name: "ada" }]; }
-}
-```
-
-```ts
 // app.ts
 import express from "express";
+import { expressScope } from "snabditel/express";
 import { di } from "~/modules/di/server";
 import { UserService } from "~/modules/users/server";
 
 const app = express();
-
-app.use((_req, _res, next) => {
-  di.run(async () => next());
-});
+app.use(expressScope(di));
 
 app.get("/users", async (_req, res) => {
-  const users = await di.resolve(UserService);
+  const users = await di.resolve(UserService); // sees this request's scope via ALS
   res.json(users.list());
 });
 
 app.listen(3000);
+```
+
+Long-form pattern (for Fastify, Hono, or custom hooks):
+
+```ts
+app.use((req, res, next) => {
+  di.run(async () => {
+    next();
+    await new Promise<void>((r) => res.once("close", r));
+  }).catch((err) => req.log?.error?.(err));
+});
 ```
 
 ### TanStack Start
@@ -466,6 +475,36 @@ await Promise.all([
 
 `AlsSnabditel` (subpath `snabditel/als`) extends this with implicit `s` propagation, so callbacks and `createInstance` may ignore the `s` arg. The subpath is separate so `node:async_hooks` only loads when imported.
 
+### Disposal
+
+Snabditel auto-disposes cached instances that implement `Symbol.asyncDispose` or `Symbol.dispose`.
+
+```ts
+class Db {
+  static readonly injectionScope = "scoped";
+  static async createInstance() {
+    const conn = await connect();
+    return new Db(conn);
+  }
+  constructor(private conn: Conn) {}
+  async [Symbol.asyncDispose]() { await this.conn.close(); }
+}
+
+await di.run(async (s) => {
+  const db = await s.resolve(Db);
+  // ... use db ...
+}); // db[Symbol.asyncDispose]() called here, LIFO with other scoped instances
+```
+
+**Rules:**
+
+- **Scoped** instances: container calls `[Symbol.asyncDispose]` (preferred) or `[Symbol.dispose]` LIFO when the `run()` callback's promise settles, success or rejection.
+- **Singletons:** disposed only on explicit `container.dispose()`, LIFO.
+- **Transient** instances are never cached, never auto-disposed. Use `await using x = await s.resolve(X)` to dispose them at block exit.
+- **Seeded values** are not disposed — the caller owns the lifetime.
+
+If a disposer throws, the others still run. Multiple failures surface as `AggregateError`. If the `run()` body also threw, the body error is `errors[0]`.
+
 ### Seeding
 
 Pre-populate values by class, string, or symbol token. Useful for test doubles and per-request data.
@@ -534,7 +573,16 @@ interface ASnabditel {
   run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T>;
 }
 
-class Snabditel implements ASnabditel { /* see above */ }
+class Snabditel implements ASnabditel {
+  resolve<T>(token: Token<T>): Promise<T>;
+  seed<T>(
+    token: string | symbol | (new (...a: any[]) => T),
+    value: T,
+    options?: { injectionScope?: InjectionScope },
+  ): void;
+  run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T>;
+  dispose(): Promise<void>; // disposes singleton instances LIFO
+}
 class AlsSnabditel implements ASnabditel { /* same surface; AsyncLocalStorage-backed run() — s arg optional in practice */ }
 ```
 
