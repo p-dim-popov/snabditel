@@ -363,3 +363,60 @@ describe("Snabditel", () => {
     expect(source).not.toMatch(/async_hooks/);
   });
 });
+
+describe("Snabditel disposal helpers", () => {
+  test("disposeAll calls Symbol.asyncDispose LIFO", async () => {
+    const calls: string[] = [];
+    const a = { [Symbol.asyncDispose]: async () => { calls.push("a"); } };
+    const b = { [Symbol.asyncDispose]: async () => { calls.push("b"); } };
+    const c = { [Symbol.asyncDispose]: async () => { calls.push("c"); } };
+    const s = new Snabditel();
+    // @ts-expect-error — exercising private surface deliberately
+    const errs = await s.disposeAll([a, b, c]);
+    expect(calls).toEqual(["c", "b", "a"]);
+    expect(errs).toEqual([]);
+  });
+
+  test("disposeAll prefers asyncDispose when both present", async () => {
+    const calls: string[] = [];
+    const x = {
+      [Symbol.dispose]: () => { calls.push("sync"); },
+      [Symbol.asyncDispose]: async () => { calls.push("async"); },
+    };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    await s.disposeAll([x]);
+    expect(calls).toEqual(["async"]);
+  });
+
+  test("disposeAll falls back to Symbol.dispose when only sync present", async () => {
+    const calls: string[] = [];
+    const x = { [Symbol.dispose]: () => { calls.push("sync"); } };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    await s.disposeAll([x]);
+    expect(calls).toEqual(["sync"]);
+  });
+
+  test("disposeAll skips items without dispose symbols", async () => {
+    const x = { hello: "world" };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    const errs = await s.disposeAll([x]);
+    expect(errs).toEqual([]);
+  });
+
+  test("disposeAll collects errors and continues", async () => {
+    const calls: string[] = [];
+    const errA = new Error("a");
+    const errC = new Error("c");
+    const a = { [Symbol.asyncDispose]: async () => { calls.push("a"); throw errA; } };
+    const b = { [Symbol.asyncDispose]: async () => { calls.push("b"); } };
+    const c = { [Symbol.asyncDispose]: async () => { calls.push("c"); throw errC; } };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    const errs = await s.disposeAll([a, b, c]);
+    expect(calls).toEqual(["c", "b", "a"]);
+    expect(errs).toEqual([errC, errA]);
+  });
+});

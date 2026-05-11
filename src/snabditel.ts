@@ -322,4 +322,25 @@ export class Snabditel implements ASnabditel {
       `${this.ownerName(binding)} effective scope is 'scoped' (inherited from a scoped dependency) but no run() scope is active.`,
     );
   }
+
+  private async disposeAll(items: Array<unknown>): Promise<unknown[]> {
+    const errs: unknown[] = [];
+    for (let i = items.length - 1; i >= 0; i--) {
+      try {
+        const v = items[i] as Record<PropertyKey, unknown>;
+        const a = v[Symbol.asyncDispose];
+        if (typeof a === "function") {
+          await (a as () => Promise<void>).call(v);
+          continue;
+        }
+        const sync = v[Symbol.dispose];
+        if (typeof sync === "function") {
+          (sync as () => void).call(v);
+        }
+      } catch (e) {
+        errs.push(e);
+      }
+    }
+    return errs;
+  }
 }
