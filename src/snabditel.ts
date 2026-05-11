@@ -10,6 +10,11 @@ import type {
 type Key = unknown;
 type Scope = Map<Key, unknown>;
 
+export type ScopeRecord = {
+  cache: Scope;
+  disposables: Array<unknown>;
+};
+
 export type Frame = {
   ownerToken: Resolvable<unknown>;
   declared: InjectionScope | undefined;
@@ -18,14 +23,14 @@ export type Frame = {
 };
 
 export type Ctx = {
-  scope: Scope | null;
+  scope: ScopeRecord | null;
   frame: Frame | null;
 };
 
 type BuildResult<T> = {
   value: T;
   effectiveScope: InjectionScope;
-  builtInScope: Scope | null;
+  builtInScope: ScopeRecord | null;
 };
 
 const RANK: Record<InjectionScope, number> = {
@@ -55,6 +60,13 @@ export class Snabditel implements ASnabditel {
     return this.resolveIn(token, this.outerCtx());
   }
 
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    const outer = this.outerCtx();
+    const record: ScopeRecord = { cache: new Map(), disposables: [] };
+    const ctx: Ctx = { scope: record, frame: outer.frame };
+    return this.wrapAsync(ctx, () => cb(this.makeScoped(ctx)));
+  }
+
   seed<T>(
     token: string | symbol | (new (...args: any[]) => T),
     value: T,
@@ -64,7 +76,7 @@ export class Snabditel implements ASnabditel {
   }
 
   private seedInto<T>(
-    scope: Scope | null,
+    scope: ScopeRecord | null,
     token: string | symbol | (new (...args: any[]) => T),
     value: T,
     options: SeedOptions,
@@ -76,16 +88,10 @@ export class Snabditel implements ASnabditel {
     }
     if (which === "scoped") {
       if (!scope) throw new Error("Scoped seed requires an active run() scope");
-      scope.set(token, value);
+      scope.cache.set(token, value);
       return;
     }
     throw new Error("Cannot seed a transient value");
-  }
-
-  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
-    const outer = this.outerCtx();
-    const ctx: Ctx = { scope: new Map(), frame: outer.frame };
-    return this.wrapAsync(ctx, () => cb(this.makeScoped(ctx)));
   }
 
   protected resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> {
@@ -98,9 +104,9 @@ export class Snabditel implements ASnabditel {
       return Promise.resolve(this.singletons.get(token) as T | Promise<T>);
     }
 
-    if (ctx.scope?.has(token)) {
+    if (ctx.scope?.cache.has(token)) {
       this.bubble("scoped", ctx.frame);
-      return Promise.resolve(ctx.scope.get(token) as T | Promise<T>);
+      return Promise.resolve(ctx.scope.cache.get(token) as T | Promise<T>);
     }
 
     const pending = this.inflight.get(token);
@@ -116,9 +122,9 @@ export class Snabditel implements ASnabditel {
     token: string | symbol,
     ctx: Ctx,
   ): Promise<T> {
-    if (ctx.scope?.has(token)) {
+    if (ctx.scope?.cache.has(token)) {
       this.bubble("scoped", ctx.frame);
-      return (await ctx.scope.get(token)) as T;
+      return (await ctx.scope.cache.get(token)) as T;
     }
     if (this.singletons.has(token)) {
       this.bubble("singleton", ctx.frame);
@@ -143,7 +149,8 @@ export class Snabditel implements ASnabditel {
       },
 
       run: <T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> => {
-        const child: Ctx = { scope: new Map(), frame: ctx.frame };
+        const record: ScopeRecord = { cache: new Map(), disposables: [] };
+        const child: Ctx = { scope: record, frame: ctx.frame };
         return this.wrapAsync(child, () => cb(this.makeScoped(child)));
       },
     };
@@ -230,7 +237,7 @@ export class Snabditel implements ASnabditel {
     token: Resolvable<T>,
     value: T,
     effective: InjectionScope,
-    builtInScope: Scope | null,
+    builtInScope: ScopeRecord | null,
     declared: InjectionScope | undefined,
   ): void {
     if (effective === "singleton") {
@@ -243,7 +250,7 @@ export class Snabditel implements ASnabditel {
           ? this.effectiveScopedNoRunError(token)
           : new Error("Scoped resolution requires an active run() scope");
       }
-      builtInScope.set(token, value);
+      builtInScope.cache.set(token, value);
       return;
     }
     // transient: no cache
