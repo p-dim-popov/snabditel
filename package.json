@@ -42,6 +42,11 @@
       "types": "./dist/types/als-index.d.ts",
       "import": "./dist/esm/als-index.js",
       "require": "./dist/cjs/als-index.js"
+    },
+    "./express": {
+      "types": "./dist/types/express-index.d.ts",
+      "import": "./dist/esm/express-index.js",
+      "require": "./dist/cjs/express-index.js"
     }
   },
   "files": [
@@ -52,8 +57,8 @@
   ],
   "scripts": {
     "build": "bun run typecheck &&bun run clean && bun run build:esm && bun run build:cjs && bun run build:types",
-    "build:esm": "bun build ./src/index.ts ./src/als-index.ts --outdir ./dist/esm --format esm --target node",
-    "build:cjs": "bun build ./src/index.ts ./src/als-index.ts --outdir ./dist/cjs --format cjs --target node",
+    "build:esm": "bun build ./src/index.ts ./src/als-index.ts ./src/express-index.ts --outdir ./dist/esm --format esm --target node",
+    "build:cjs": "bun build ./src/index.ts ./src/als-index.ts ./src/express-index.ts --outdir ./dist/cjs --format cjs --target node",
     "build:types": "tsgo -p tsconfig.types.json",
     "clean": "rm -rf dist",
     "typecheck": "tsgo --noEmit",
