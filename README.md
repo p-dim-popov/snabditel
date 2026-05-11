@@ -5,14 +5,15 @@
 [![zero deps](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/p-dim-popov/snabditel)
 [![types](https://img.shields.io/npm/types/snabditel)](https://www.npmjs.com/package/snabditel)
 
-Tiny async DI for TypeScript. Zero deps.
+Tiny async DI container, NestJS-inspired — no ceremonies. Zero deps.
+
+No decorators, no module declarations, no providers list, no `@Inject()` tokens — just classes with a static `createInstance` factory and `resolve()`.
 
 > Снабдител — Bulgarian for "supplier". Supplies your services with their dependencies, and you with your services.
 
 ## Features
 
 - **Zero runtime dependencies.**
-- **Tiny.** ~2.4 kB minzipped.
 - **Async-first.** `resolve()` returns a Promise — no sync/async split.
 - **Three scopes.** `singleton`, `transient`, `scoped`.
 - **Concurrent-safe by default.** Base `Snabditel` supports parallel `run()` scopes via an explicit scope-bound resolver — works in the browser, no `node:async_hooks`. `AlsSnabditel` (subpath `snabditel/als`, node-only) adds implicit propagation for callers who want to skip threading the resolver.
@@ -23,6 +24,7 @@ Tiny async DI for TypeScript. Zero deps.
 ## Install
 
 ```bash
+# pick one
 npm install snabditel
 pnpm add snabditel
 yarn add snabditel
@@ -31,23 +33,40 @@ bun add snabditel
 
 ## Quick start
 
+Explicit scopes are only needed when you want to override the inferred default — most classes can omit `injectionScope` entirely.
+
 ```ts
-import { Snabditel, type ASnabditel } from "snabditel";
+// ~/modules/di/server.ts
+import { Snabditel } from "snabditel";
 
-const di = new Snabditel();
+export const di = new Snabditel();
+```
 
-class Logger {
+```ts
+// ~/modules/logger/logger.ts
+export class Logger {
   info(msg: string) { console.log(msg); }
 }
+```
 
-class UserService {
-  static readonly injectionScope = "scoped";
+```ts
+// ~/modules/users/user.service.ts
+import type { ASnabditel } from "snabditel";
+import { Logger } from "~/modules/logger/server";
+
+export class UserService {
   static async createInstance(s: ASnabditel) {
     return new UserService(await s.resolve(Logger));
   }
   constructor(private logger: Logger) {}
   greet(name: string) { this.logger.info(`hello ${name}`); }
 }
+```
+
+```ts
+// app.ts
+import { di } from "~/modules/di/server";
+import { UserService } from "~/modules/users/server";
 
 await di.run(async (s) => {
   const users = await s.resolve(UserService);
@@ -55,7 +74,7 @@ await di.run(async (s) => {
 });
 ```
 
-`UserService` declares its deps via `createInstance` — `Logger` resolves automatically. `scoped` means each `run()` (e.g. each request) gets a fresh `UserService`; `Logger` stays singleton.
+`UserService` declares its deps via `createInstance` — `Logger` resolves automatically. With no `injectionScope` declared, the effective scope is inferred from dependencies. The `s` arg is the scope-bound resolver `di.run` provides — thread it into nested `s.resolve(...)` calls.
 
 ## Recipes
 
@@ -64,16 +83,25 @@ await di.run(async (s) => {
 Wrap each request in a fresh DI scope using `AlsSnabditel`.
 
 ```ts
-import express from "express";
+// ~/modules/di/server.ts
 import { AlsSnabditel } from "snabditel/als";
 
-const di = new AlsSnabditel();
+export const di = new AlsSnabditel();
+```
 
-class UserService {
-  static readonly injectionScope = "scoped";
+```ts
+// ~/modules/users/user.service.ts
+export class UserService {
   static createInstance() { return new UserService(); }
   list() { return [{ id: 1, name: "ada" }]; }
 }
+```
+
+```ts
+// app.ts
+import express from "express";
+import { di } from "~/modules/di/server";
+import { UserService } from "~/modules/users/server";
 
 const app = express();
 
@@ -94,13 +122,15 @@ app.listen(3000);
 Register the DI scope as **global request middleware** in `src/start.ts`. This wraps every request (server routes, SSR, server functions) in a fresh `di.run` scope. ALS propagates the scope implicitly, so handlers keep using module-level `di.resolve(...)`.
 
 ```ts
-// src/di.ts
+// ~/modules/di/server.ts
 import { AlsSnabditel } from "snabditel/als";
 
 export const di = new AlsSnabditel();
+```
 
+```ts
+// ~/modules/users/user.service.ts
 export class UserService {
-  static readonly injectionScope = "scoped";
   static createInstance() { return new UserService(); }
   list() { return [{ id: 1 }]; }
 }
@@ -109,7 +139,7 @@ export class UserService {
 ```ts
 // src/start.ts
 import { createStart, createMiddleware } from "@tanstack/react-start";
-import { di } from "./di";
+import { di } from "~/modules/di/server";
 
 const diMiddleware = createMiddleware().server(({ next }) =>
   di.run(() => next()),
@@ -122,7 +152,8 @@ export const startInstance = createStart(() => ({
 
 ```ts
 // any server route, server function, or loader
-import { di, UserService } from "./di";
+import { di } from "~/modules/di/server";
+import { UserService } from "~/modules/users/server";
 
 const users = await di.resolve(UserService); // sees the request's scope via ALS
 ```
@@ -131,46 +162,53 @@ Use `functionMiddleware` instead of `requestMiddleware` to limit the scope to se
 
 ### React + React Query
 
-Browser side. Each `queryFn` opens its own `di.run(s => ...)` — concurrent runs are safe in base `Snabditel`. `Api` is `transient` to demonstrate scope propagation; `AuthToken` is `scoped` so all transient `Api` instances inside one query share the same auth view.
+Browser side. Each `queryFn` opens its own `di.run(s => ...)` — concurrent runs are safe in base `Snabditel`.
 
 ```ts
-// di.ts
-import { Snabditel, type ASnabditel } from "snabditel";
+// ~/modules/di/client.ts
+import { Snabditel } from "snabditel";
 
 export const di = new Snabditel();
+```
+
+```ts
+// ~/modules/config/app-config.ts
+type ConfigShape = { backendUrl: string };
 
 export class AppConfig {
   static createInstance() {
     return new AppConfig({ backendUrl: import.meta.env.VITE_BACKEND_URL });
   }
-  constructor(private cfg: { backendUrl: string }) {}
-  get backendUrl() { return this.cfg.backendUrl; }
-}
-
-export class AuthToken {
-  static readonly injectionScope = "scoped";
-  static async createInstance() {
-    return new AuthToken(await loadToken());
+  constructor(private cfg: ConfigShape) {}
+  get<K extends keyof ConfigShape>(key: K): ConfigShape[K] {
+    return this.cfg[key];
   }
-  constructor(public value: string) {}
 }
+```
+
+```ts
+// ~/modules/api/api.ts
+import type { ASnabditel } from "snabditel";
+import { AppConfig } from "~/modules/config/client";
 
 export class Api {
-  static readonly injectionScope = "transient";
+  static readonly injectionScope = "scoped"; // one Api per query run; AppConfig stays singleton
   static async createInstance(s: ASnabditel) {
-    return new Api(await s.resolve(AppConfig), await s.resolve(AuthToken));
+    return new Api(await s.resolve(AppConfig));
   }
-  constructor(private config: AppConfig, private auth: AuthToken) {}
-  async request(path: string, init?: RequestInit) {
-    return fetch(`${this.config.backendUrl}${path}`, {
-      ...init,
-      headers: { ...init?.headers, Authorization: `Bearer ${this.auth.value}` },
-    });
+  constructor(private config: AppConfig) {}
+  request(path: string, init?: RequestInit) {
+    return fetch(`${this.config.get("backendUrl")}${path}`, init);
   }
 }
+```
+
+```ts
+// ~/modules/users/users.client.ts
+import type { ASnabditel } from "snabditel";
+import { Api } from "~/modules/api/client";
 
 export class UsersClient {
-  // No injectionScope → inferred transient (narrowest dep = Api).
   static async createInstance(s: ASnabditel) {
     return new UsersClient(await s.resolve(Api));
   }
@@ -180,9 +218,10 @@ export class UsersClient {
 ```
 
 ```ts
-// users.queries.ts
+// ~/modules/users/users.queries.ts
 import { queryOptions } from "@tanstack/react-query";
-import { di, UsersClient } from "./di";
+import { di } from "~/modules/di/client";
+import { UsersClient } from "./users.client";
 
 export const usersQueryOptions = queryOptions({
   queryKey: ["users"],
@@ -196,18 +235,20 @@ export const usersQueryOptions = queryOptions({
 
 ```tsx
 // Users.tsx
-import { useQuery } from "@tanstack/react-query";
-import { usersQueryOptions } from "./users.queries";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { usersQueryOptions } from "~/modules/users/client";
 
 export function Users() {
-  const { data } = useQuery(usersQueryOptions);
-  return <ul>{data?.map((u: any) => <li key={u.id}>{u.name}</li>)}</ul>;
+  const { data } = useSuspenseQuery(usersQueryOptions);
+  return <ul>{data.map((user) => <li key={user.id}>{user.name}</li>)}</ul>;
 }
 ```
 
-Propagation: `queryFn` opens scope → `s.resolve(UsersClient)` → `UsersClient.createInstance(s)` → `s.resolve(Api)` → `Api.createInstance(s)` → `s.resolve(AppConfig)` (singleton, root cache) + `s.resolve(AuthToken)` (scoped, cached on `s`). Two parallel `useQuery`s = two parallel `di.run`s = two isolated `AuthToken`s. `Api` rebuilt each resolve (transient). All in browser, no `node:async_hooks`.
+Propagation: `queryFn` opens scope → `s.resolve(UsersClient)` (inferred scoped) → `UsersClient.createInstance(s)` → `s.resolve(Api)` (scoped, cached on `s`) → `Api.createInstance(s)` → `s.resolve(AppConfig)` (singleton, root cache). Two parallel `useSuspenseQuery`s = two parallel `di.run`s = two isolated `Api` instances; `AppConfig` shared. All in browser, no `node:async_hooks`.
 
 ## Concepts
+
+Examples below use module-level `di` for brevity. Under base `Snabditel`, accept `s: ASnabditel` in `createInstance` and call `s.resolve(...)` instead — same pattern as the recipes.
 
 ### Tokens
 
@@ -223,85 +264,13 @@ Anything resolvable:
 class Database {
   static async createInstance() {
     const config = await di.resolve(AppConfig);
-    const connectionString = config.get("db.connectionString");
-    const connection = await connect(connectionString);
+    const connection = await connect(config.get("db.connectionString"));
     return new Database(connection);
   }
-
   constructor(public conn: unknown) {}
 }
 
 const db = await di.resolve(Database);
-```
-
-#### Swapping an implementation
-
-```ts
-class Mailer {
-  static async createInstance() {
-    const config = await di.resolve(AppConfig);
-    const mailerConfig = config.get('mailer');
-    const provider = await (async () => {
-      switch (mailerConfig.provider) {
-        case "smtp": return di.resolve(SmtpMailerProvider);
-        case "fake": return di.resolve(FakeMailerProvider);
-        default: throw new Error("Unknown mailer provider");
-      }
-    })()
-    return new Mailer(provider);
-  }
-
-  constructor(private readonly provider: MailerProvider) {}
-
-  send(to: string): {
-    // ...
-  }
-}
-
-interface MailerProvider {
-  send(to: string): Promise<void>;
-}
-
-class SmtpMailerProvider implements MailerProvider { async send(to: string) { /* ... */ } }
-class FakeMailerProvider implements MailerProvider { async send(_: string) {} }
-
-const mailer = await di.resolve(Mailer); // SmtpMailer or FakeMailer based on config
-```
-
-#### Using a factory
-
-```ts
-class MailerProviderFactory {
-  static async createInstance() {
-    const config = await di.resolve(AppConfig);
-    return new MailerProviderFactory(config);
-  }
-
-  constructor(private readonly config: AppConfig) {}
-
-  create() {
-    const mailerConfig = this.config.get('mailer');
-    switch (mailerConfig.provider) {
-      case "smtp": return di.resolve(SmtpMailerProvider);
-      case "fake": return di.resolve(FakeMailerProvider);
-      default: throw new Error("Unknown mailer provider");
-    }
-  }
-}
-
-class Mailer {
-  static async createInstance() {
-    const mailerProviderFactory = await di.resolve(MailerProviderFactory);
-    const provider = await mailerProviderFactory.create();
-    return new Mailer(provider);
-  }
-
-  constructor(private readonly provider: MailerProvider) {}
-
-  send(to: string): {
-    // ...
-  }
-}
 ```
 
 #### Non-class values
@@ -313,6 +282,94 @@ di.seed("CFG", { apiUrl: "https://api.example.com" });
 const cfg = await di.resolve<{ apiUrl: string }>("CFG");
 ```
 
+#### Swapping an implementation
+
+Real example: pick between SMTP (nodemailer) and SendGrid based on config.
+
+```ts
+import nodemailer, { type Transporter } from "nodemailer";
+import { MailService } from "@sendgrid/mail";
+
+interface MailerProvider {
+  send(to: string, subject: string, html: string): Promise<void>;
+}
+
+class SmtpMailerProvider implements MailerProvider {
+  static async createInstance() {
+    const config = await di.resolve(AppConfig);
+    const { host, port, user, pass } = config.get("smtp");
+    return new SmtpMailerProvider(
+      nodemailer.createTransport({ host, port, auth: { user, pass } }),
+    );
+  }
+  constructor(private transport: Transporter) {}
+  async send(to: string, subject: string, html: string) {
+    await this.transport.sendMail({ to, subject, html });
+  }
+}
+
+class SendGridMailerProvider implements MailerProvider {
+  static async createInstance() {
+    const config = await di.resolve(AppConfig);
+    const sg = new MailService();
+    sg.setApiKey(config.get("sendgrid.apiKey"));
+    return new SendGridMailerProvider(sg, config.get("sendgrid.from"));
+  }
+  constructor(private sg: MailService, private from: string) {}
+  async send(to: string, subject: string, html: string) {
+    await this.sg.send({ to, from: this.from, subject, html });
+  }
+}
+
+class Mailer {
+  static async createInstance() {
+    const config = await di.resolve(AppConfig);
+    switch (config.get("mailer.provider")) {
+      case "smtp":     return new Mailer(await di.resolve(SmtpMailerProvider));
+      case "sendgrid": return new Mailer(await di.resolve(SendGridMailerProvider));
+      default: throw new Error("Unknown mailer provider");
+    }
+  }
+  constructor(private provider: MailerProvider) {}
+  send(to: string, subject: string, html: string) {
+    return this.provider.send(to, subject, html);
+  }
+}
+
+const mailer = await di.resolve(Mailer); // SMTP or SendGrid based on config
+```
+
+#### Using a factory
+
+Same `Mailer`, different wiring — pull the dispatch out into a dedicated factory:
+
+```ts
+class MailerProviderFactory {
+  static async createInstance() {
+    return new MailerProviderFactory(await di.resolve(AppConfig));
+  }
+  constructor(private config: AppConfig) {}
+  create(): Promise<MailerProvider> {
+    switch (this.config.get("mailer.provider")) {
+      case "smtp":     return di.resolve(SmtpMailerProvider);
+      case "sendgrid": return di.resolve(SendGridMailerProvider);
+      default: throw new Error("Unknown mailer provider");
+    }
+  }
+}
+
+class Mailer {
+  static async createInstance() {
+    const factory = await di.resolve(MailerProviderFactory);
+    return new Mailer(await factory.create());
+  }
+  constructor(private provider: MailerProvider) {}
+  send(to: string, subject: string, html: string) {
+    return this.provider.send(to, subject, html);
+  }
+}
+```
+
 ### Scopes
 
 | Scope | Behavior |
@@ -320,6 +377,8 @@ const cfg = await di.resolve<{ apiUrl: string }>("CFG");
 | `singleton` | Cached forever in container. Default. |
 | `transient` | New instance every `resolve()`. Cannot be `seed()`-ed. |
 | `scoped` | Cached per `run()`. Requires active scope. |
+
+Declare a scope explicitly only when you need to override the inferred default.
 
 ```ts
 class RequestContext {
@@ -377,6 +436,8 @@ Inference and validation are first-resolve operations. Once a token is cached, s
 
 Both flavors handle parallel `run()` calls. Base `Snabditel` requires the explicit `s` resolver passed to `run`'s callback (and to `createInstance`); `AlsSnabditel` propagates it implicitly via `AsyncLocalStorage`.
 
+(`Logger`, `req1`, and `req2` elided — see Quick start for `Logger`.)
+
 ```ts
 import { Snabditel, type ASnabditel } from "snabditel";
 
@@ -418,23 +479,63 @@ di.seed(Logger, fakeLogger);
 class CurrentUser { constructor(public id: string) {} }
 
 await di.run(async (s) => {
+  // scoped seed: shadows any singleton seed for this run() only
   s.seed(CurrentUser, new CurrentUser("u_123"), { injectionScope: "scoped" });
   const user = await s.resolve(CurrentUser);
 });
 ```
 
-Scoped seeds shadow singleton seeds inside `run()`. A `transient` seed throws.
+A `transient` seed throws.
+
+## Testing
+
+The point of DI is that your class doesn't reach for its dependencies. In tests, skip the container entirely and pass a fake straight to the constructor — no `seed()`, no `run()`, no async wiring.
+
+```ts
+import { test, expect } from "bun:test";
+
+class FakeMailerProvider implements MailerProvider {
+  sent: Array<{ to: string; subject: string }> = [];
+  async send(to: string, subject: string) {
+    this.sent.push({ to, subject });
+  }
+}
+
+test("sends welcome email", async () => {
+  const fake = new FakeMailerProvider();
+  const mailer = new Mailer(fake);
+
+  await mailer.send("ada@example.com", "Welcome", "<p>hi</p>");
+
+  expect(fake.sent).toEqual([{ to: "ada@example.com", subject: "Welcome" }]);
+});
+```
+
+When you _do_ need DI in a test — to exercise the wiring, or to override a deeply-nested dep — use `seed()` (see [Seeding](#seeding)).
 
 ## API
 
 ```ts
-class Snabditel implements ASnabditel {
+type InjectionScope = "singleton" | "transient" | "scoped";
+
+type Token<T> =
+  | (new () => T)
+  | (SelfResolvable<T>)   // class with static createInstance + optional injectionScope
+  | string
+  | symbol;
+
+interface ASnabditel {
   resolve<T>(token: Token<T>): Promise<T>;
-  seed<T>(token: string | symbol | (new (...a: any[]) => T), value: T, options?: { injectionScope?: InjectionScope }): void;
+  seed<T>(
+    token: string | symbol | (new (...a: any[]) => T),
+    value: T,
+    options?: { injectionScope?: InjectionScope },
+  ): void;
   run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T>;
 }
 
-class AlsSnabditel implements ASnabditel {} // ALS-backed run() — s arg optional in practice; same inheritance + validation
+class Snabditel implements ASnabditel { /* see above */ }
+class AlsSnabditel implements ASnabditel { /* same surface; AsyncLocalStorage-backed run() — s arg optional in practice */ }
 ```
 
 ## Develop

@@ -1,7 +1,7 @@
 {
   "name": "snabditel",
   "version": "0.0.1",
-  "description": "Tiny async DI for TypeScript. Zero deps. ESM + CJS, scoped/singleton/transient, cycle detection, optional ALS propagation.",
+  "description": "Tiny async DI container, NestJS-inspired — no ceremonies. Zero deps. ESM + CJS, scoped/singleton/transient, cycle detection, optional ALS propagation.",
   "license": "MIT",
   "author": "Peter Popov <p.dim.popov@gmail.com>",
   "homepage": "https://github.com/p-dim-popov/snabditel#readme",
@@ -23,7 +23,10 @@
     "singleton",
     "als",
     "async-hooks",
-    "zero-dependencies"
+    "zero-dependencies",
+    "nestjs",
+    "nestjs-inspired",
+    "react-query"
   ],
   "type": "module",
   "main": "./dist/cjs/index.js",
