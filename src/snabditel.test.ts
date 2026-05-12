@@ -621,6 +621,46 @@ describe("Snabditel container.dispose()", () => {
     expect(calls).toBe(1);
   });
 
+  test("disposes singletons with sync Symbol.dispose", async () => {
+    const calls: string[] = [];
+    class A {
+      static createInstance() { return new A(); }
+      [Symbol.dispose]() { calls.push("A"); }
+    }
+    const s = new Snabditel();
+    await s.resolve(A);
+    await s.dispose();
+    expect(calls).toEqual(["A"]);
+  });
+
+  test("dispose() drains in-flight singleton builds before disposing", async () => {
+    // Without the drain, a build that completes mid-dispose would be cached
+    // and tracked in the fresh disposables list — never to be disposed.
+    let resolveBuild!: () => void;
+    const gate = new Promise<void>((r) => { resolveBuild = r; });
+    let disposed = false;
+    class Slow {
+      static async createInstance() {
+        await gate;
+        return new Slow();
+      }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    const pending = s.resolve(Slow);
+    // Kick dispose() while the build is still gated.
+    const disposing = (async () => {
+      // Yield a tick so the build has registered in `inflight`.
+      await new Promise((r) => setImmediate(r));
+      const p = s.dispose();
+      resolveBuild();
+      await p;
+    })();
+    await pending;
+    await disposing;
+    expect(disposed).toBe(true);
+  });
+
   test("seeded singleton value is not disposed by container.dispose()", async () => {
     let disposed = false;
     const obj = {

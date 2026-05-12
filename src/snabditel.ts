@@ -71,10 +71,18 @@ export class Snabditel implements ASnabditel {
   }
 
   async dispose(): Promise<void> {
+    // Drain in-flight singleton builds first so they land in the cache + the
+    // disposables list before snapshot. Otherwise late-arriving instances stay
+    // cached forever, undisposed.
+    if (this.inflight.size > 0) {
+      await Promise.allSettled([...this.inflight.values()]);
+    }
     const items = this.singletonDisposables;
     this.singletonDisposables = [];
-    const errs = await this.disposeAll(items);
+    // Clear cache before awaiting disposers so a concurrent resolve() cannot
+    // hand out a reference to an instance whose disposer is already running.
     this.singletons.clear();
+    const errs = await this.disposeAll(items);
     if (errs.length > 0) {
       throw new AggregateError(errs, "singleton disposal failed");
     }

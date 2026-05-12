@@ -24,8 +24,6 @@
     "als",
     "async-hooks",
     "zero-dependencies",
-    "nestjs",
-    "nestjs-inspired",
     "react-query"
   ],
   "type": "module",
@@ -67,7 +65,9 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/express": "^5.0.6",
     "@typescript/native-preview": "^7.0.0-dev.20260509.2",
+    "express": "^5.2.1",
     "typescript": "^6.0.3"
   }
 }

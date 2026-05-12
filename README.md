@@ -499,11 +499,18 @@ await di.run(async (s) => {
 **Rules:**
 
 - **Scoped** instances: container calls `[Symbol.asyncDispose]` (preferred) or `[Symbol.dispose]` LIFO when the `run()` callback's promise settles, success or rejection.
-- **Singletons:** disposed only on explicit `container.dispose()`, LIFO.
+- **Singletons:** disposed only on explicit `container.dispose()`, LIFO. Call at shutdown:
+
+  ```ts
+  await di.dispose();
+  ```
+
 - **Transient** instances are never cached, never auto-disposed. Use `await using x = await s.resolve(X)` to dispose them at block exit.
 - **Seeded values** are not disposed — the caller owns the lifetime.
 
 If a disposer throws, the others still run. Multiple failures surface as `AggregateError`. If the `run()` body also threw, the body error is `errors[0]`.
+
+Don't allocate new resources via `resolve()` from inside a disposer — disposers run after the cache is drained, so new instances would be tracked but require another `dispose()` to clean.
 
 ### Seeding
 
