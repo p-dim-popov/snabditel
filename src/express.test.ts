@@ -80,10 +80,12 @@ describe("expressScope (real Express)", () => {
 
   test("scoped resource is disposed after response completes", async () => {
     const disposed: string[] = [];
+    let signalDisposed!: () => void;
+    const allDisposed = new Promise<void>((r) => { signalDisposed = r; });
     class Db {
       static readonly injectionScope = "scoped" as const;
       static createInstance() { return new Db(); }
-      async [Symbol.asyncDispose]() { disposed.push("db"); }
+      async [Symbol.asyncDispose]() { disposed.push("db"); signalDisposed(); }
     }
     const fx = await startApp((di, app) => {
       app.get("/", (async (_req, res) => {
@@ -93,10 +95,7 @@ describe("expressScope (real Express)", () => {
     });
     try {
       await fetch(`${fx.base}/`);
-      // Disposal happens after the response is sent — give the close event a tick.
-      for (let i = 0; i < 20 && disposed.length === 0; i++) {
-        await new Promise((r) => setImmediate(r));
-      }
+      await allDisposed;
       expect(disposed).toEqual(["db"]);
     } finally {
       await stopApp(fx);
@@ -108,10 +107,12 @@ describe("expressScope (real Express)", () => {
     // after next(), a sync-ending handler could emit "close" before the listener
     // is wired, and the run() promise would never resolve.
     const disposed: string[] = [];
+    let signalDisposed!: () => void;
+    const allDisposed = new Promise<void>((r) => { signalDisposed = r; });
     class Db {
       static readonly injectionScope = "scoped" as const;
       static createInstance() { return new Db(); }
-      async [Symbol.asyncDispose]() { disposed.push("db"); }
+      async [Symbol.asyncDispose]() { disposed.push("db"); signalDisposed(); }
     }
     const fx = await startApp((di, app) => {
       app.get("/quick", (async (_req, res) => {
@@ -122,9 +123,7 @@ describe("expressScope (real Express)", () => {
     try {
       const r = await fetch(`${fx.base}/quick`);
       expect(r.status).toBe(204);
-      for (let i = 0; i < 20 && disposed.length === 0; i++) {
-        await new Promise((r) => setImmediate(r));
-      }
+      await allDisposed;
       expect(disposed).toEqual(["db"]);
     } finally {
       await stopApp(fx);
@@ -133,6 +132,8 @@ describe("expressScope (real Express)", () => {
 
   test("routes disposer errors to req.log.error", async () => {
     const logged: unknown[] = [];
+    let signalLogged!: () => void;
+    const allLogged = new Promise<void>((r) => { signalLogged = r; });
     class BadDb {
       static readonly injectionScope = "scoped" as const;
       static createInstance() { return new BadDb(); }
@@ -142,7 +143,7 @@ describe("expressScope (real Express)", () => {
       // Inject a req.log per request before expressScope's catch fires.
       app.use((req, _res, next) => {
         (req as unknown as { log: { error: (e: unknown) => void } }).log = {
-          error: (e) => { logged.push(e); },
+          error: (e) => { logged.push(e); signalLogged(); },
         };
         next();
       });
@@ -153,9 +154,7 @@ describe("expressScope (real Express)", () => {
     });
     try {
       await fetch(`${fx.base}/`);
-      for (let i = 0; i < 20 && logged.length === 0; i++) {
-        await new Promise((r) => setImmediate(r));
-      }
+      await allLogged;
       expect(logged.length).toBe(1);
       const err = logged[0];
       expect(err).toBeInstanceOf(AggregateError);

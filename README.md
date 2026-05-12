@@ -590,7 +590,7 @@ class Snabditel implements ASnabditel {
   run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T>;
   dispose(): Promise<void>; // disposes singleton instances LIFO
 }
-class AlsSnabditel implements ASnabditel { /* same surface; AsyncLocalStorage-backed run() — s arg optional in practice */ }
+class AlsSnabditel implements ASnabditel { /* same surface, incl. dispose(); AsyncLocalStorage-backed run() — s arg optional in practice */ }
 ```
 
 ## Develop

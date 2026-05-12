@@ -10,11 +10,13 @@ import type {
 type Key = unknown;
 type Scope = Map<Key, unknown>;
 
+/** @internal */
 export type ScopeRecord = {
   cache: Scope;
   disposables: Array<unknown>;
 };
 
+/** @internal */
 export type Frame = {
   ownerToken: Resolvable<unknown>;
   declared: InjectionScope | undefined;
@@ -22,6 +24,7 @@ export type Frame = {
   parent: Frame | null;
 };
 
+/** @internal */
 export type Ctx = {
   scope: ScopeRecord | null;
   frame: Frame | null;
@@ -39,6 +42,7 @@ const RANK: Record<InjectionScope, number> = {
   singleton: 2,
 };
 
+/** @internal */
 export const EMPTY_CTX: Ctx = Object.freeze({
   scope: null,
   frame: null,
@@ -48,6 +52,7 @@ export class Snabditel implements ASnabditel {
   private singletons: Scope = new Map();
   private singletonDisposables: Array<unknown> = [];
   private inflight = new Map<Key, Promise<BuildResult<unknown>>>();
+  private disposing = false;
 
   protected outerCtx(): Ctx {
     return EMPTY_CTX;
@@ -62,6 +67,7 @@ export class Snabditel implements ASnabditel {
   }
 
   async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    if (this.disposing) throw this.disposedError();
     const outer = this.outerCtx();
     const record: ScopeRecord = { cache: new Map(), disposables: [] };
     const ctx: Ctx = { scope: record, frame: outer.frame };
@@ -71,20 +77,28 @@ export class Snabditel implements ASnabditel {
   }
 
   async dispose(): Promise<void> {
-    // Drain in-flight singleton builds first so they land in the cache + the
-    // disposables list before snapshot. Otherwise late-arriving instances stay
-    // cached forever, undisposed.
-    if (this.inflight.size > 0) {
-      await Promise.allSettled([...this.inflight.values()]);
-    }
-    const items = this.singletonDisposables;
-    this.singletonDisposables = [];
-    // Clear cache before awaiting disposers so a concurrent resolve() cannot
-    // hand out a reference to an instance whose disposer is already running.
-    this.singletons.clear();
-    const errs = await this.disposeAll(items);
-    if (errs.length > 0) {
-      throw new AggregateError(errs, "singleton disposal failed");
+    // Set the guard before any await so concurrent resolve()/run() calls land
+    // in the rejected path while disposal is in progress. Cleared in finally
+    // so the container is reusable after dispose() resolves.
+    this.disposing = true;
+    try {
+      // Drain in-flight singleton builds first so they land in the cache + the
+      // disposables list before snapshot. Otherwise late-arriving instances stay
+      // cached forever, undisposed.
+      if (this.inflight.size > 0) {
+        await Promise.allSettled([...this.inflight.values()]);
+      }
+      const items = this.singletonDisposables;
+      this.singletonDisposables = [];
+      // Clear cache before awaiting disposers so a concurrent resolve() cannot
+      // hand out a reference to an instance whose disposer is already running.
+      this.singletons.clear();
+      const errs = await this.disposeAll(items);
+      if (errs.length > 0) {
+        throw new AggregateError(errs, "singleton disposal failed");
+      }
+    } finally {
+      this.disposing = false;
     }
   }
 
@@ -145,6 +159,7 @@ export class Snabditel implements ASnabditel {
   }
 
   protected resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> {
+    if (this.disposing) return Promise.reject(this.disposedError());
     if (typeof token === "string" || typeof token === "symbol") {
       return this.readSeedAndBubble<T>(token, ctx);
     }
@@ -375,6 +390,12 @@ export class Snabditel implements ASnabditel {
     return new Error(
       `Cannot resolve ${this.ownerName(binding)} as ${declared}: depends on a ${min} service. ` +
         `Either remove \`injectionScope\` to inherit '${min}', or set it to '${min}' or 'transient'.`,
+    );
+  }
+
+  private disposedError(): Error {
+    return new Error(
+      "Snabditel: dispose() is in progress; concurrent resolve()/run() is rejected.",
     );
   }
 

@@ -661,6 +661,53 @@ describe("Snabditel container.dispose()", () => {
     expect(disposed).toBe(true);
   });
 
+  test("resolve() while dispose() is in progress rejects", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    class Slow {
+      static createInstance() { return new Slow(); }
+      async [Symbol.asyncDispose]() { await gate; }
+    }
+    class Other {
+      static createInstance() { return new Other(); }
+    }
+    const s = new Snabditel();
+    await s.resolve(Slow);
+    const disposing = s.dispose();
+    // Yield so dispose() enters and flips the guard.
+    await new Promise((r) => setImmediate(r));
+    await expect(s.resolve(Other)).rejects.toThrow(/dispose\(\) is in progress/);
+    release();
+    await disposing;
+  });
+
+  test("run() while dispose() is in progress rejects", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    class Slow {
+      static createInstance() { return new Slow(); }
+      async [Symbol.asyncDispose]() { await gate; }
+    }
+    const s = new Snabditel();
+    await s.resolve(Slow);
+    const disposing = s.dispose();
+    await new Promise((r) => setImmediate(r));
+    await expect(s.run(async () => {})).rejects.toThrow(/dispose\(\) is in progress/);
+    release();
+    await disposing;
+  });
+
+  test("container is reusable after dispose() completes", async () => {
+    class A { static createInstance() { return new A(); } }
+    const s = new Snabditel();
+    const a1 = await s.resolve(A);
+    await s.dispose();
+    // Guard is cleared in finally — resolve() works again.
+    const a2 = await s.resolve(A);
+    expect(a2).not.toBe(a1);
+    expect(a2).toBeInstanceOf(A);
+  });
+
   test("seeded singleton value is not disposed by container.dispose()", async () => {
     let disposed = false;
     const obj = {
