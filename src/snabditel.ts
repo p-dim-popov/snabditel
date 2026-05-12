@@ -10,6 +10,13 @@ import type {
 type Key = unknown;
 type Scope = Map<Key, unknown>;
 
+/** @internal */
+export type ScopeRecord = {
+  cache: Scope;
+  disposables: Array<unknown>;
+};
+
+/** @internal */
 export type Frame = {
   ownerToken: Resolvable<unknown>;
   declared: InjectionScope | undefined;
@@ -17,15 +24,16 @@ export type Frame = {
   parent: Frame | null;
 };
 
+/** @internal */
 export type Ctx = {
-  scope: Scope | null;
+  scope: ScopeRecord | null;
   frame: Frame | null;
 };
 
 type BuildResult<T> = {
   value: T;
   effectiveScope: InjectionScope;
-  builtInScope: Scope | null;
+  builtInScope: ScopeRecord | null;
 };
 
 const RANK: Record<InjectionScope, number> = {
@@ -34,6 +42,7 @@ const RANK: Record<InjectionScope, number> = {
   singleton: 2,
 };
 
+/** @internal */
 export const EMPTY_CTX: Ctx = Object.freeze({
   scope: null,
   frame: null,
@@ -41,7 +50,9 @@ export const EMPTY_CTX: Ctx = Object.freeze({
 
 export class Snabditel implements ASnabditel {
   private singletons: Scope = new Map();
+  private singletonDisposables: Array<unknown> = [];
   private inflight = new Map<Key, Promise<BuildResult<unknown>>>();
+  private disposing = false;
 
   protected outerCtx(): Ctx {
     return EMPTY_CTX;
@@ -55,6 +66,71 @@ export class Snabditel implements ASnabditel {
     return this.resolveIn(token, this.outerCtx());
   }
 
+  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
+    if (this.disposing) throw this.disposedError();
+    const outer = this.outerCtx();
+    const record: ScopeRecord = { cache: new Map(), disposables: [] };
+    const ctx: Ctx = { scope: record, frame: outer.frame };
+    return this.runWithDisposal(record, () =>
+      this.wrapAsync(ctx, () => cb(this.makeScoped(ctx))),
+    );
+  }
+
+  async dispose(): Promise<void> {
+    // Set the guard before any await so concurrent resolve()/run() calls land
+    // in the rejected path while disposal is in progress. Cleared in finally
+    // so the container is reusable after dispose() resolves.
+    this.disposing = true;
+    try {
+      // Drain in-flight singleton builds first so they land in the cache + the
+      // disposables list before snapshot. Otherwise late-arriving instances stay
+      // cached forever, undisposed.
+      if (this.inflight.size > 0) {
+        await Promise.allSettled([...this.inflight.values()]);
+      }
+      const items = this.singletonDisposables;
+      this.singletonDisposables = [];
+      // Clear cache before awaiting disposers so a concurrent resolve() cannot
+      // hand out a reference to an instance whose disposer is already running.
+      this.singletons.clear();
+      const errs = await this.disposeAll(items);
+      if (errs.length > 0) {
+        throw new AggregateError(errs, "singleton disposal failed");
+      }
+    } finally {
+      this.disposing = false;
+    }
+  }
+
+  private async runWithDisposal<T>(
+    record: ScopeRecord,
+    body: () => Promise<T>,
+  ): Promise<T> {
+    let bodyErr: unknown;
+    let bodyOk = false;
+    let result: T | undefined;
+    try {
+      result = await body();
+      bodyOk = true;
+    } catch (e) {
+      bodyErr = e;
+    }
+    const disposeErrs = await this.disposeAll(record.disposables);
+    if (!bodyOk) {
+      if (disposeErrs.length > 0) {
+        throw new AggregateError(
+          [bodyErr, ...disposeErrs],
+          "run() body + disposal failed",
+        );
+      }
+      throw bodyErr;
+    }
+    if (disposeErrs.length > 0) {
+      throw new AggregateError(disposeErrs, "disposal failed");
+    }
+    return result as T;
+  }
+
   seed<T>(
     token: string | symbol | (new (...args: any[]) => T),
     value: T,
@@ -64,7 +140,7 @@ export class Snabditel implements ASnabditel {
   }
 
   private seedInto<T>(
-    scope: Scope | null,
+    scope: ScopeRecord | null,
     token: string | symbol | (new (...args: any[]) => T),
     value: T,
     options: SeedOptions,
@@ -76,19 +152,14 @@ export class Snabditel implements ASnabditel {
     }
     if (which === "scoped") {
       if (!scope) throw new Error("Scoped seed requires an active run() scope");
-      scope.set(token, value);
+      scope.cache.set(token, value);
       return;
     }
     throw new Error("Cannot seed a transient value");
   }
 
-  async run<T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> {
-    const outer = this.outerCtx();
-    const ctx: Ctx = { scope: new Map(), frame: outer.frame };
-    return this.wrapAsync(ctx, () => cb(this.makeScoped(ctx)));
-  }
-
   protected resolveIn<T>(token: Token<T>, ctx: Ctx): Promise<T> {
+    if (this.disposing) return Promise.reject(this.disposedError());
     if (typeof token === "string" || typeof token === "symbol") {
       return this.readSeedAndBubble<T>(token, ctx);
     }
@@ -98,9 +169,9 @@ export class Snabditel implements ASnabditel {
       return Promise.resolve(this.singletons.get(token) as T | Promise<T>);
     }
 
-    if (ctx.scope?.has(token)) {
+    if (ctx.scope?.cache.has(token)) {
       this.bubble("scoped", ctx.frame);
-      return Promise.resolve(ctx.scope.get(token) as T | Promise<T>);
+      return Promise.resolve(ctx.scope.cache.get(token) as T | Promise<T>);
     }
 
     const pending = this.inflight.get(token);
@@ -116,9 +187,9 @@ export class Snabditel implements ASnabditel {
     token: string | symbol,
     ctx: Ctx,
   ): Promise<T> {
-    if (ctx.scope?.has(token)) {
+    if (ctx.scope?.cache.has(token)) {
       this.bubble("scoped", ctx.frame);
-      return (await ctx.scope.get(token)) as T;
+      return (await ctx.scope.cache.get(token)) as T;
     }
     if (this.singletons.has(token)) {
       this.bubble("singleton", ctx.frame);
@@ -143,8 +214,11 @@ export class Snabditel implements ASnabditel {
       },
 
       run: <T>(cb: (s: ASnabditel) => Promise<T>): Promise<T> => {
-        const child: Ctx = { scope: new Map(), frame: ctx.frame };
-        return this.wrapAsync(child, () => cb(this.makeScoped(child)));
+        const record: ScopeRecord = { cache: new Map(), disposables: [] };
+        const child: Ctx = { scope: record, frame: ctx.frame };
+        return this.runWithDisposal(record, () =>
+          this.wrapAsync(child, () => cb(this.makeScoped(child))),
+        );
       },
     };
   }
@@ -230,11 +304,12 @@ export class Snabditel implements ASnabditel {
     token: Resolvable<T>,
     value: T,
     effective: InjectionScope,
-    builtInScope: Scope | null,
+    builtInScope: ScopeRecord | null,
     declared: InjectionScope | undefined,
   ): void {
     if (effective === "singleton") {
       this.singletons.set(token, value);
+      if (this.isDisposable(value)) this.singletonDisposables.push(value);
       return;
     }
     if (effective === "scoped") {
@@ -243,10 +318,18 @@ export class Snabditel implements ASnabditel {
           ? this.effectiveScopedNoRunError(token)
           : new Error("Scoped resolution requires an active run() scope");
       }
-      builtInScope.set(token, value);
+      builtInScope.cache.set(token, value);
+      if (this.isDisposable(value)) builtInScope.disposables.push(value);
       return;
     }
     // transient: no cache
+  }
+
+  private isDisposable(v: unknown): boolean {
+    if (v === null || (typeof v !== "object" && typeof v !== "function")) return false;
+    const o = v as Record<PropertyKey, unknown>;
+    return typeof o[Symbol.asyncDispose] === "function"
+      || typeof o[Symbol.dispose] === "function";
   }
 
   private narrower(a: InjectionScope, b: InjectionScope): InjectionScope {
@@ -310,9 +393,36 @@ export class Snabditel implements ASnabditel {
     );
   }
 
+  private disposedError(): Error {
+    return new Error(
+      "Snabditel: dispose() is in progress; concurrent resolve()/run() is rejected.",
+    );
+  }
+
   private effectiveScopedNoRunError<T>(binding: Resolvable<T>): Error {
     return new Error(
       `${this.ownerName(binding)} effective scope is 'scoped' (inherited from a scoped dependency) but no run() scope is active.`,
     );
+  }
+
+  private async disposeAll(items: Array<unknown>): Promise<unknown[]> {
+    const errs: unknown[] = [];
+    for (let i = items.length - 1; i >= 0; i--) {
+      try {
+        const v = items[i] as Record<PropertyKey, unknown>;
+        const a = v[Symbol.asyncDispose];
+        if (typeof a === "function") {
+          await (a as () => Promise<void>).call(v);
+          continue;
+        }
+        const sync = v[Symbol.dispose];
+        if (typeof sync === "function") {
+          (sync as () => void).call(v);
+        }
+      } catch (e) {
+        errs.push(e);
+      }
+    }
+    return errs;
   }
 }

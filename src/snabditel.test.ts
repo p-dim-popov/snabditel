@@ -363,3 +363,360 @@ describe("Snabditel", () => {
     expect(source).not.toMatch(/async_hooks/);
   });
 });
+
+describe("Snabditel disposal helpers", () => {
+  test("disposeAll calls Symbol.asyncDispose LIFO", async () => {
+    const calls: string[] = [];
+    const a = { [Symbol.asyncDispose]: async () => { calls.push("a"); } };
+    const b = { [Symbol.asyncDispose]: async () => { calls.push("b"); } };
+    const c = { [Symbol.asyncDispose]: async () => { calls.push("c"); } };
+    const s = new Snabditel();
+    // @ts-expect-error — exercising private surface deliberately
+    const errs = await s.disposeAll([a, b, c]);
+    expect(calls).toEqual(["c", "b", "a"]);
+    expect(errs).toEqual([]);
+  });
+
+  test("disposeAll prefers asyncDispose when both present", async () => {
+    const calls: string[] = [];
+    const x = {
+      [Symbol.dispose]: () => { calls.push("sync"); },
+      [Symbol.asyncDispose]: async () => { calls.push("async"); },
+    };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    await s.disposeAll([x]);
+    expect(calls).toEqual(["async"]);
+  });
+
+  test("disposeAll falls back to Symbol.dispose when only sync present", async () => {
+    const calls: string[] = [];
+    const x = { [Symbol.dispose]: () => { calls.push("sync"); } };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    await s.disposeAll([x]);
+    expect(calls).toEqual(["sync"]);
+  });
+
+  test("disposeAll skips items without dispose symbols", async () => {
+    const x = { hello: "world" };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    const errs = await s.disposeAll([x]);
+    expect(errs).toEqual([]);
+  });
+
+  test("disposeAll collects errors and continues", async () => {
+    const calls: string[] = [];
+    const errA = new Error("a");
+    const errC = new Error("c");
+    const a = { [Symbol.asyncDispose]: async () => { calls.push("a"); throw errA; } };
+    const b = { [Symbol.asyncDispose]: async () => { calls.push("b"); } };
+    const c = { [Symbol.asyncDispose]: async () => { calls.push("c"); throw errC; } };
+    const s = new Snabditel();
+    // @ts-expect-error — private
+    const errs = await s.disposeAll([a, b, c]);
+    expect(calls).toEqual(["c", "b", "a"]);
+    expect(errs).toEqual([errC, errA]);
+  });
+});
+
+describe("Snabditel scoped disposal", () => {
+  test("scoped instance with asyncDispose is disposed at run() end", async () => {
+    let disposed = false;
+    class Db {
+      static readonly injectionScope = "scoped" as const;
+      static async createInstance() { return new Db(); }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => { await sc.resolve(Db); });
+    expect(disposed).toBe(true);
+  });
+
+  test("scoped instance with sync Symbol.dispose is disposed at run() end", async () => {
+    let disposed = false;
+    class Cache {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Cache(); }
+      [Symbol.dispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => { await sc.resolve(Cache); });
+    expect(disposed).toBe(true);
+  });
+
+  test("scoped instances are disposed LIFO", async () => {
+    const calls: string[] = [];
+    class A {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new A(); }
+      async [Symbol.asyncDispose]() { calls.push("A"); }
+    }
+    class B {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new B(); }
+      async [Symbol.asyncDispose]() { calls.push("B"); }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      await sc.resolve(A);
+      await sc.resolve(B);
+    });
+    expect(calls).toEqual(["B", "A"]);
+  });
+
+  test("scoped instance is disposed even when run() body throws", async () => {
+    let disposed = false;
+    class Db {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Db(); }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    const err = new Error("boom");
+    await expect(
+      s.run(async (sc) => { await sc.resolve(Db); throw err; })
+    ).rejects.toBe(err);
+    expect(disposed).toBe(true);
+  });
+
+  test("dispose errors after successful body throw AggregateError", async () => {
+    const dErr = new Error("d");
+    class Bad {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Bad(); }
+      async [Symbol.asyncDispose]() { throw dErr; }
+    }
+    const s = new Snabditel();
+    let caught: unknown;
+    try {
+      await s.run(async (sc) => { await sc.resolve(Bad); });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors).toEqual([dErr]);
+  });
+
+  test("body error + dispose error → AggregateError with body first", async () => {
+    const bodyErr = new Error("body");
+    const dErr = new Error("dispose");
+    class Bad {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Bad(); }
+      async [Symbol.asyncDispose]() { throw dErr; }
+    }
+    const s = new Snabditel();
+    let caught: unknown;
+    try {
+      await s.run(async (sc) => { await sc.resolve(Bad); throw bodyErr; });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors[0]).toBe(bodyErr);
+    expect((caught as AggregateError).errors[1]).toBe(dErr);
+  });
+
+  test("nested run() — inner disposes on inner exit", async () => {
+    const calls: string[] = [];
+    class Inner {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Inner(); }
+      async [Symbol.asyncDispose]() { calls.push("inner"); }
+    }
+    class Outer {
+      static readonly injectionScope = "scoped" as const;
+      static createInstance() { return new Outer(); }
+      async [Symbol.asyncDispose]() { calls.push("outer"); }
+    }
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      await sc.resolve(Outer);
+      await sc.run(async (inner) => { await inner.resolve(Inner); });
+      expect(calls).toEqual(["inner"]); // outer still alive
+    });
+    expect(calls).toEqual(["inner", "outer"]);
+  });
+
+  test("transient instances are never auto-disposed by container", async () => {
+    let disposed = false;
+    const tok: SelfResolvable<{ tag: string }> = {
+      injectionScope: "transient",
+      createInstance: () => ({
+        tag: "x",
+        [Symbol.asyncDispose]: async () => { disposed = true; },
+      }) as { tag: string },
+    };
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      await sc.resolve(tok);
+    });
+    expect(disposed).toBe(false);
+  });
+
+  test("seeded scoped value is not disposed", async () => {
+    let disposed = false;
+    const obj = {
+      [Symbol.asyncDispose]: async () => { disposed = true; },
+    };
+    const s = new Snabditel();
+    await s.run(async (sc) => {
+      sc.seed("OWNED", obj, { injectionScope: "scoped" });
+      await sc.resolve("OWNED");
+    });
+    expect(disposed).toBe(false);
+  });
+});
+
+describe("Snabditel container.dispose()", () => {
+  test("disposes singletons LIFO and clears the cache", async () => {
+    const calls: string[] = [];
+    class A {
+      static createInstance() { return new A(); }
+      async [Symbol.asyncDispose]() { calls.push("A"); }
+    }
+    class B {
+      static createInstance() { return new B(); }
+      async [Symbol.asyncDispose]() { calls.push("B"); }
+    }
+    const s = new Snabditel();
+    const a1 = await s.resolve(A);
+    await s.resolve(B);
+    await s.dispose();
+    expect(calls).toEqual(["B", "A"]);
+    const a2 = await s.resolve(A);
+    expect(a2).not.toBe(a1);
+  });
+
+  test("dispose() throws AggregateError when disposers throw", async () => {
+    const err = new Error("nope");
+    class Bad {
+      static createInstance() { return new Bad(); }
+      async [Symbol.asyncDispose]() { throw err; }
+    }
+    const s = new Snabditel();
+    await s.resolve(Bad);
+    let caught: unknown;
+    try {
+      await s.dispose();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors).toEqual([err]);
+  });
+
+  test("dispose() is idempotent", async () => {
+    let calls = 0;
+    class A {
+      static createInstance() { return new A(); }
+      async [Symbol.asyncDispose]() { calls++; }
+    }
+    const s = new Snabditel();
+    await s.resolve(A);
+    await s.dispose();
+    await s.dispose();
+    expect(calls).toBe(1);
+  });
+
+  test("disposes singletons with sync Symbol.dispose", async () => {
+    const calls: string[] = [];
+    class A {
+      static createInstance() { return new A(); }
+      [Symbol.dispose]() { calls.push("A"); }
+    }
+    const s = new Snabditel();
+    await s.resolve(A);
+    await s.dispose();
+    expect(calls).toEqual(["A"]);
+  });
+
+  test("dispose() drains in-flight singleton builds before disposing", async () => {
+    // Without the drain, a build that completes mid-dispose would be cached
+    // and tracked in the fresh disposables list — never to be disposed.
+    let resolveBuild!: () => void;
+    const gate = new Promise<void>((r) => { resolveBuild = r; });
+    let disposed = false;
+    class Slow {
+      static async createInstance() {
+        await gate;
+        return new Slow();
+      }
+      async [Symbol.asyncDispose]() { disposed = true; }
+    }
+    const s = new Snabditel();
+    const pending = s.resolve(Slow);
+    // Kick dispose() while the build is still gated.
+    const disposing = (async () => {
+      // Yield a tick so the build has registered in `inflight`.
+      await new Promise((r) => setImmediate(r));
+      const p = s.dispose();
+      resolveBuild();
+      await p;
+    })();
+    await pending;
+    await disposing;
+    expect(disposed).toBe(true);
+  });
+
+  test("resolve() while dispose() is in progress rejects", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    class Slow {
+      static createInstance() { return new Slow(); }
+      async [Symbol.asyncDispose]() { await gate; }
+    }
+    class Other {
+      static createInstance() { return new Other(); }
+    }
+    const s = new Snabditel();
+    await s.resolve(Slow);
+    const disposing = s.dispose();
+    // Yield so dispose() enters and flips the guard.
+    await new Promise((r) => setImmediate(r));
+    await expect(s.resolve(Other)).rejects.toThrow(/dispose\(\) is in progress/);
+    release();
+    await disposing;
+  });
+
+  test("run() while dispose() is in progress rejects", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    class Slow {
+      static createInstance() { return new Slow(); }
+      async [Symbol.asyncDispose]() { await gate; }
+    }
+    const s = new Snabditel();
+    await s.resolve(Slow);
+    const disposing = s.dispose();
+    await new Promise((r) => setImmediate(r));
+    await expect(s.run(async () => {})).rejects.toThrow(/dispose\(\) is in progress/);
+    release();
+    await disposing;
+  });
+
+  test("container is reusable after dispose() completes", async () => {
+    class A { static createInstance() { return new A(); } }
+    const s = new Snabditel();
+    const a1 = await s.resolve(A);
+    await s.dispose();
+    // Guard is cleared in finally — resolve() works again.
+    const a2 = await s.resolve(A);
+    expect(a2).not.toBe(a1);
+    expect(a2).toBeInstanceOf(A);
+  });
+
+  test("seeded singleton value is not disposed by container.dispose()", async () => {
+    let disposed = false;
+    const obj = {
+      [Symbol.asyncDispose]: async () => { disposed = true; },
+    };
+    const s = new Snabditel();
+    s.seed("OWNED", obj);
+    await s.resolve("OWNED");
+    await s.dispose();
+    expect(disposed).toBe(false);
+  });
+});
